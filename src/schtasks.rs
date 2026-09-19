@@ -81,7 +81,7 @@ fn schtasks_query_error(out: &std::process::Output) -> SchtasksError {
 
 /// schtasks XML output is UTF-16 when it carries a BOM, otherwise OEM/ANSI
 /// bytes that we can only decode lossily.
-fn decode(bytes: &[u8]) -> String {
+pub fn decode(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         let units: Vec<u16> = rest
             .as_chunks::<2>()
@@ -225,7 +225,12 @@ pub struct FakeSchtasks {
     pub fail_create_paths: Vec<String>,
     pub fail_delete_paths: Vec<String>,
     pub create_calls: Vec<String>,
+    /// XML passed to each create call, aligned with `create_calls`.
+    pub create_xmls: Vec<String>,
     pub delete_calls: Vec<String>,
+    /// Raw XML appended to the query response; injects marker-free
+    /// unmanaged tasks or malformed documents (default empty).
+    pub extra_query_xml: String,
 }
 
 impl FakeSchtasks {
@@ -235,7 +240,9 @@ impl FakeSchtasks {
             fail_create_paths: Vec::new(),
             fail_delete_paths: Vec::new(),
             create_calls: Vec::new(),
+            create_xmls: Vec::new(),
             delete_calls: Vec::new(),
+            extra_query_xml: String::new(),
         }
     }
 
@@ -252,6 +259,7 @@ impl FakeSchtasks {
                 NS = crate::xml::TASK_XML_NS
             ));
         }
+        out.push_str(&self.extra_query_xml);
         out
     }
 }
@@ -267,13 +275,14 @@ impl Schtasks for FakeSchtasks {
         Ok(self.query_xml())
     }
 
-    fn create(&mut self, path: &str, _xml: &str) -> Result<(), SchtasksError> {
+    fn create(&mut self, path: &str, xml: &str) -> Result<(), SchtasksError> {
         if self.fail_create_paths.iter().any(|p| p == path) {
             return Err(SchtasksError(format!(
                 "schtasks /Create /TN {path} failed: ERROR ACCESS DENIED"
             )));
         }
         self.create_calls.push(path.to_string());
+        self.create_xmls.push(xml.to_string());
         Ok(())
     }
 
