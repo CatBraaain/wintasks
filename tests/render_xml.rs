@@ -7,6 +7,9 @@
 
 mod common;
 
+#[path = "fixtures/spec_cases.rs"]
+mod spec_cases;
+
 use chrono::NaiveDateTime;
 use common::{run_render, write_temp_yaml};
 
@@ -345,61 +348,40 @@ fn start_boundary_has_no_timezone_offset() {
     );
 }
 
-// ------------------------------------------------------- spec XML example
-// Spec: the documented YAML must render to exactly the documented XML
-// when the run date is 2026-09-20 and the run time is before 09:00.
+// ------------------------------------------------------- spec case tables
+// Spec: the `## 変換テストケース` tables in SPEC.md define conversion-
+// level cases; a case passes when the rendered output contains the
+// expected fragment after whitespace-only text between tags is removed
+// on both sides. The data lives in SPEC.md and is extracted by
+// `tests/fixtures/spec_cases.rs`.
+
+#[test]
+fn spec_case_tables_render_the_expected_fragments() {
+    let spec_cases = spec_cases::cases();
+    assert!(!spec_cases.is_empty(), "spec case tables must not be empty");
+    for case in spec_cases {
+        let now = at(case.now.0, case.now.1, case.now.2, case.now.3, case.now.4);
+        let out = render_at(&case.yaml, now);
+        assert!(
+            spec_cases::compact(&out).contains(&spec_cases::compact(&case.expected)),
+            "case `{}`\ninput:\n{}\nexpected fragment: {}",
+            case.name,
+            case.yaml,
+            case.expected
+        );
+    }
+}
 
 #[test]
 fn spec_example_renders_the_documented_document() {
-    let yaml = r#"- name: backup
-  trigger:
-    type: cron
-    value: "0 9 * * MON"
-  action:
-    command: C:\Tools\backup.exe
-    args: --full
-    working_directory: C:\Backup
-"#;
-    let expected = r#"--- backup ---
-<?xml version="1.0" encoding="UTF-8"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>managed-by: wintasks; def-hash: d267337fd4bff92644f1a6b00cd8e7595eab43031389a2cef9947ece4198ab33</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <CalendarTrigger>
-      <StartBoundary>2026-09-20T09:00:00</StartBoundary>
-      <ScheduleByWeek>
-        <DaysOfWeek>
-          <Monday/>
-        </DaysOfWeek>
-      </ScheduleByWeek>
-    </CalendarTrigger>
-  </Triggers>
-  <Principals>
-    <Principal>
-      <RunLevel>LeastPrivilege</RunLevel>
-      <LogonType>InteractiveToken</LogonType>
-    </Principal>
-  </Principals>
-  <Settings>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-  </Settings>
-  <Actions>
-    <Exec>
-      <Command>C:\Tools\backup.exe</Command>
-      <Arguments>--full</Arguments>
-      <WorkingDirectory>C:\Backup</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-"#;
-    // Run time 08:00 is before the 09:00 boundary, so the documented
-    // StartBoundary (no +1-day correction) is expected.
-    let out = render_at(yaml, at(2026, 9, 20, 8, 0));
-    assert_eq!(out, expected);
+    let example = spec_cases::example();
+    let out = render_at(&example.yaml, at(2026, 9, 20, 8, 0));
+    assert!(
+        spec_cases::compact(&out).contains(&spec_cases::compact(&example.expected)),
+        "input:\n{}\nexpected document: {}",
+        example.yaml,
+        example.expected
+    );
 }
 
 // --------------------------------------------------------- render output

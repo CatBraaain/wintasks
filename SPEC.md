@@ -206,6 +206,39 @@ trigger 種別の選択:
 - cron トリガーの StartBoundary が実行時点のローカル時刻以下なら、StartBoundary を +1 日する。1 回のみ補正し、補正後も過去ならそのままにする
 - 補正は `cron` type の trigger のみに適用し、`startup` / `boot` / `once` / `now` には適用しない
 
+## 変換テストケース
+
+この節の表は、変換単位のテストケースである。テストコードがこの節を読み、各行の入力定義から XML を生成し、期待 XML との一致を検証する。比較の前には、生成結果と期待 XML から、タグの間にある空白だけのテキストを取り除く。期待 XML は生成結果に含まれていればよく、インデントは比較に含まれない。表のセルには `|` を書いてはならない。
+
+トリガー定義の行は、テスト側が次の最小タスクでラップする:
+
+```yaml
+- name: sample
+  trigger: { type: <type>, value: "<value>" }
+  action: { command: cmd.exe }
+```
+
+実行時刻のセルは cron の行では必須であり、それ以外の行では無視される。
+
+| type | value | 実行時刻 | 期待 XML |
+|---|---|---|---|
+| `startup` | `01:30` | | `<LogonTrigger><Delay>PT1H30M</Delay></LogonTrigger>` |
+| `boot` | `00:30` | | `<BootTrigger><Delay>PT30M</Delay></BootTrigger>` |
+| `once` | `2030-06-01` | | `<TimeTrigger><StartBoundary>2030-06-01T00:00:00</StartBoundary></TimeTrigger>` |
+| `now` | `x` | | `<RegistrationTrigger/>` |
+| `cron` | `0 11 * * *` | 2026-01-15 10:00 | `<CalendarTrigger><StartBoundary>2026-01-15T11:00:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>` |
+| `cron` | `0 9 * * *` | 2026-01-15 10:00 | `<CalendarTrigger><StartBoundary>2026-01-16T09:00:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>` |
+| `cron` | `*/15 9-17 * * *` | 2026-01-15 10:00 | `<CalendarTrigger><StartBoundary>2026-01-16T09:00:00</StartBoundary><Repetition><Interval>PT15M</Interval><Duration>PT9H</Duration></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>` |
+| `cron` | `0,30 9,21 * * *` | 2026-01-15 10:00 | `<CalendarTrigger><StartBoundary>2026-01-16T09:00:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-16T09:30:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-15T21:00:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-15T21:30:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>` |
+
+アクション定義の行は、トリガーを `{ type: now, value: "x" }` としてトリガーと同じ形でラップする。空のセルのキーは書かない。
+
+| command | args | working_directory | 期待 XML |
+|---|---|---|---|
+| `cmd.exe` | | | `<Exec><Command>cmd.exe</Command></Exec>` |
+| `C:\Tools\a.exe` | `--one` | | `<Exec><Command>C:\Tools\a.exe</Command><Arguments>--one</Arguments><WorkingDirectory>C:\Tools</WorkingDirectory></Exec>` |
+| `C:\Tools\a.exe` | | `C:\Data` | `<Exec><Command>C:\Tools\a.exe</Command><WorkingDirectory>C:\Data</WorkingDirectory></Exec>` |
+
 ## apply
 
 次の順序で処理する。
