@@ -4,16 +4,19 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 use quick_xml::events::Event;
-use quick_xml::{Reader, XmlVersion};
+use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::def::DESCRIPTION_MARKER;
 
+#[derive(Clone)]
 pub struct ManagedTask {
     /// Task Scheduler path such as `\WinTasks\cron\name`.
     pub path: String,
     /// def-hash parsed from the Description marker; None when unreadable,
     /// which forces an update comparison mismatch.
     pub def_hash: Option<String>,
+    /// Complete Task XML from `/Query /XML`, retained for dry-run diffs.
+    pub xml: String,
 }
 
 #[derive(Debug)]
@@ -131,7 +134,7 @@ pub fn extract_tasks(xml_text: &str) -> QuerySummary {
     let mut reader = Reader::from_str(xml_text);
     // Concatenated documents are not well-formed as a whole.
     reader.config_mut().check_end_names = false;
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
 
     let mut tasks = Vec::new();
     let mut all_paths = std::collections::BTreeSet::new();
@@ -140,12 +143,24 @@ pub fn extract_tasks(xml_text: &str) -> QuerySummary {
     let mut description = String::new();
     let mut uri = String::new();
     let mut capture: Option<Capture> = None;
+    let mut task_xml: Option<Writer<Vec<u8>>> = None;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 depth += 1;
                 let name: Vec<u8> = e.name().local_name().into_inner().as_bytes().to_vec();
+                if depth == 1 && name.as_slice() == b"Task" {
+                    let mut writer = Writer::new(Vec::new());
+                    writer
+                        .write_event(Event::Start(e.to_owned()))
+                        .expect("writing task XML to a Vec cannot fail");
+                    task_xml = Some(writer);
+                } else if let Some(writer) = task_xml.as_mut() {
+                    writer
+                        .write_event(Event::Start(e.to_owned()))
+                        .expect("writing task XML to a Vec cannot fail");
+                }
                 match (depth, name.as_slice()) {
                     (2, b"RegistrationInfo") => in_registration_info = true,
                     (3, b"Description") if in_registration_info => {
@@ -155,8 +170,19 @@ pub fn extract_tasks(xml_text: &str) -> QuerySummary {
                     _ => {}
                 }
             }
-            Ok(Event::Empty(_)) => {}
+            Ok(Event::Empty(e)) => {
+                if let Some(writer) = task_xml.as_mut() {
+                    writer
+                        .write_event(Event::Empty(e.to_owned()))
+                        .expect("writing task XML to a Vec cannot fail");
+                }
+            }
             Ok(Event::Text(t)) => {
+                if let Some(writer) = task_xml.as_mut() {
+                    writer
+                        .write_event(Event::Text(t.to_owned()))
+                        .expect("writing task XML to a Vec cannot fail");
+                }
                 let text = t.xml_content(XmlVersion::Explicit1_0);
                 match capture {
                     Some(Capture::Description) => description.push_str(&text),
@@ -166,6 +192,11 @@ pub fn extract_tasks(xml_text: &str) -> QuerySummary {
             }
             Ok(Event::End(e)) => {
                 let name: Vec<u8> = e.name().local_name().into_inner().as_bytes().to_vec();
+                if let Some(writer) = task_xml.as_mut() {
+                    writer
+                        .write_event(Event::End(e.to_owned()))
+                        .expect("writing task XML to a Vec cannot fail");
+                }
                 match (depth, name.as_slice()) {
                     (3, b"Description") | (3, b"URI") => capture = None,
                     (2, b"RegistrationInfo") => in_registration_info = false,
@@ -174,10 +205,15 @@ pub fn extract_tasks(xml_text: &str) -> QuerySummary {
                             all_paths.insert(uri_to_task_path(&uri));
                         }
                         if description.starts_with(DESCRIPTION_MARKER) && !uri.is_empty() {
+                            let xml = task_xml.take().expect("Task end must follow a Task start");
                             tasks.push(ManagedTask {
                                 path: uri_to_task_path(&uri),
                                 def_hash: parse_def_hash(&description),
+                                xml: String::from_utf8(xml.into_inner())
+                                    .expect("parsed XML is valid UTF-8"),
                             });
+                        } else {
+                            task_xml = None;
                         }
                         description.clear();
                         uri.clear();
@@ -187,7 +223,13 @@ pub fn extract_tasks(xml_text: &str) -> QuerySummary {
                 depth = depth.saturating_sub(1);
             }
             Ok(Event::Eof) => break,
-            Ok(_) => {}
+            Ok(event) => {
+                if let Some(writer) = task_xml.as_mut() {
+                    writer
+                        .write_event(event.into_owned())
+                        .expect("writing task XML to a Vec cannot fail");
+                }
+            }
             Err(_) => break, // best effort: keep tasks parsed so far
         }
     }

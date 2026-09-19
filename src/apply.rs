@@ -7,7 +7,7 @@ use chrono::NaiveDateTime;
 
 use crate::def::{TaskDef, parse_defs};
 use crate::schtasks::{Schtasks, extract_tasks};
-use crate::xml::render_task_xml;
+use crate::xml::{render_task_xml, task_xml_diff};
 
 pub struct ApplyOptions {
     pub mount: String,
@@ -25,6 +25,13 @@ enum Action {
     Create,
     Update,
     NoChange,
+}
+
+struct PlannedTask {
+    path: String,
+    action: Action,
+    desired_xml: String,
+    current_xml: Option<String>,
 }
 
 /// Runs apply and returns the process exit code. Reports go to `out`
@@ -59,9 +66,9 @@ pub fn run_apply(
         Err(e) => return fail(&e.0, err),
     };
     let summary = extract_tasks(&query);
-    let mut managed: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut managed = BTreeMap::new();
     for task in summary.managed {
-        managed.insert(task.path, task.def_hash);
+        managed.insert(task.path.clone(), task);
     }
     let all_paths = summary.all_paths;
 
@@ -70,7 +77,9 @@ pub fn run_apply(
     let mut errors: Vec<String> = Vec::new();
     for (path, task) in &desired {
         let action = match (managed.get(path), all_paths.contains(path)) {
-            (Some(Some(existing_hash)), _) if existing_hash == &task.def_hash => Action::NoChange,
+            (Some(existing), _) if existing.def_hash.as_ref() == Some(&task.def_hash) => {
+                Action::NoChange
+            }
             (Some(_), _) => Action::Update,
             (None, true) => {
                 // Same-name task without the marker: never overwrite.
@@ -81,15 +90,20 @@ pub fn run_apply(
             }
             (None, false) => Action::Create,
         };
-        plan.push((path.clone(), action, task.xml.clone()));
+        plan.push(PlannedTask {
+            path: path.clone(),
+            action,
+            desired_xml: task.xml.clone(),
+            current_xml: managed.get(path).map(|existing| existing.xml.clone()),
+        });
     }
 
     // Step 4: prune targets.
     let desired_paths: BTreeSet<&String> = desired.iter().map(|(p, _)| p).collect();
-    let prune_targets: Vec<String> = if opts.prune {
+    let prune_targets = if opts.prune {
         managed
-            .keys()
-            .filter(|p| !desired_paths.contains(*p))
+            .values()
+            .filter(|task| !desired_paths.contains(&task.path))
             .cloned()
             .collect()
     } else {
@@ -97,11 +111,25 @@ pub fn run_apply(
     };
 
     if opts.dry_run {
-        for (path, action, _) in &plan {
-            let _ = writeln!(out, "{} {}", label(action), path);
+        for task in &plan {
+            let _ = writeln!(out, "{} {}", label(&task.action), task.path);
+            if matches!(&task.action, Action::Update)
+                && let Err(message) = write_dry_run_diff(
+                    task.current_xml
+                        .as_deref()
+                        .expect("updates have current XML"),
+                    &task.desired_xml,
+                    out,
+                )
+            {
+                return fail(&message, err);
+            }
         }
-        for path in &prune_targets {
-            let _ = writeln!(out, "delete {path}");
+        for task in &prune_targets {
+            let _ = writeln!(out, "delete {}", task.path);
+            if let Err(message) = write_dry_run_diff(&task.xml, "", out) {
+                return fail(&message, err);
+            }
         }
         // A plan that would fail on a real apply (unmanaged same-name
         // collisions) must not exit 0.
@@ -110,29 +138,41 @@ pub fn run_apply(
 
     // Step 5: execute creates/updates, then prunes; failures do not stop
     // the loop and are reported at the end (spec).
-    for (path, action, xml) in &plan {
-        match action {
+    for task in &plan {
+        match &task.action {
             Action::NoChange => {
-                let _ = writeln!(out, "no-change {path}");
+                let _ = writeln!(out, "no-change {}", task.path);
             }
-            Action::Create | Action::Update => match sched.create(path, xml) {
+            Action::Create | Action::Update => match sched.create(&task.path, &task.desired_xml) {
                 Ok(()) => {
-                    let _ = writeln!(out, "{} {path}", label(action));
+                    let _ = writeln!(out, "{} {}", label(&task.action), task.path);
                 }
                 Err(e) => errors.push(format!("error: {}", e.0)),
             },
         }
     }
-    for path in &prune_targets {
-        match sched.delete(path) {
+    for task in &prune_targets {
+        match sched.delete(&task.path) {
             Ok(()) => {
-                let _ = writeln!(out, "delete {path}");
+                let _ = writeln!(out, "delete {}", task.path);
             }
             Err(e) => errors.push(format!("error: {}", e.0)),
         }
     }
 
     finish(&errors, err)
+}
+
+fn write_dry_run_diff(current: &str, desired: &str, out: &mut dyn Write) -> Result<(), String> {
+    match task_xml_diff(current, desired)? {
+        Some(diff) => {
+            let _ = write!(out, "{diff}");
+        }
+        None => {
+            let _ = writeln!(out, "  (no diff)");
+        }
+    }
+    Ok(())
 }
 
 fn label(action: &Action) -> &'static str {
@@ -230,6 +270,19 @@ mod tests {
         code: i32,
         out: String,
         err: String,
+    }
+
+    #[test]
+    fn dry_run_diff_reports_no_diff_for_equivalent_xml() {
+        let current =
+            "<Task><RegistrationInfo><Description>old</Description></RegistrationInfo></Task>";
+        let desired =
+            "<Task><RegistrationInfo><Description>new</Description></RegistrationInfo></Task>";
+        let mut out = Vec::new();
+
+        write_dry_run_diff(current, desired, &mut out).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "  (no diff)\n");
     }
 
     #[test]
@@ -389,7 +442,16 @@ mod tests {
         o.prune = true;
         let cap = capture(TWO_TASKS, &o, &mut fake);
         assert_eq!(cap.code, 0);
-        let reported: Vec<&str> = cap.out.lines().collect();
+        let reported: Vec<&str> = cap
+            .out
+            .lines()
+            .filter(|line| {
+                matches!(
+                    line.split_once(' ').map(|(action, _)| action),
+                    Some("create" | "update" | "no-change" | "delete")
+                )
+            })
+            .collect();
         assert_eq!(
             reported,
             vec![

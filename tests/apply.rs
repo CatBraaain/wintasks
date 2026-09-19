@@ -93,6 +93,18 @@ fn def_hash_of(yaml: &str, name: &str) -> String {
     def_hash(def).expect("hash")
 }
 
+fn action_lines(output: &str) -> Vec<&str> {
+    output
+        .lines()
+        .filter(|line| {
+            matches!(
+                line.split_once(' ').map(|(action, _)| action),
+                Some("create" | "update" | "no-change" | "delete")
+            )
+        })
+        .collect()
+}
+
 /// A query-response document carrying the managed marker.
 fn managed_query_doc(path: &str) -> String {
     query_doc(path, &format!("managed-by: wintasks; def-hash: {}", "0".repeat(64)))
@@ -461,7 +473,7 @@ fn dry_run_shows_plan_in_yaml_order_then_deletes_in_name_order() {
     o.prune = true;
     let cap = capture(THREE_TASKS, &o, &mut fake);
     assert_eq!(cap.code, 0);
-    let planned: Vec<&str> = cap.out.lines().collect();
+    let planned = action_lines(&cap.out);
     assert_eq!(
         planned,
         vec![
@@ -473,6 +485,25 @@ fn dry_run_shows_plan_in_yaml_order_then_deletes_in_name_order() {
         ],
         "{planned:?}"
     );
+
+    let lines: Vec<&str> = cap.out.lines().collect();
+    let line_index = |expected: &str| {
+        lines
+            .iter()
+            .position(|line| *line == expected)
+            .unwrap_or_else(|| panic!("missing {expected}: {}", cap.out))
+    };
+    let update_index = line_index("update \\WinTasks\\startup\\Bye");
+    let create_index = line_index("create \\WinTasks\\once\\New");
+    let no_change_index = line_index("no-change \\WinTasks\\cron\\Hello");
+    let alpha_delete_index = line_index("delete \\WinTasks\\boot\\Alpha");
+    let gone_delete_index = line_index("delete \\WinTasks\\cron\\Gone");
+    assert_eq!(lines[update_index + 1], "--- current");
+    assert_eq!(lines[update_index + 2], "+++ desired");
+    assert_eq!(lines[create_index + 1], "no-change \\WinTasks\\cron\\Hello");
+    assert_eq!(lines[no_change_index + 1], "delete \\WinTasks\\boot\\Alpha");
+    assert_eq!(lines[alpha_delete_index + 1], "--- current");
+    assert_eq!(lines[gone_delete_index + 1], "--- current");
 }
 
 #[test]
@@ -485,6 +516,65 @@ fn dry_run_changes_nothing() {
     o.prune = true;
     let cap = capture(ONE_TASK, &o, &mut fake);
     assert_eq!(cap.code, 0);
+    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
+}
+
+#[test]
+fn dry_run_create_and_no_change_have_no_diff() {
+    let same = def_hash_of(ONE_TASK, "Hello");
+    let mut fake = FakeSchtasks::new();
+    fake.tasks
+        .insert("\\WinTasks\\cron\\Hello".to_string(), Some(same));
+    let mut o = opts();
+    o.dry_run = true;
+    let cap = capture(TWO_TASKS, &o, &mut fake);
+    assert_eq!(cap.code, 0);
+    assert_eq!(
+        cap.out,
+        "no-change \\WinTasks\\cron\\Hello\ncreate \\WinTasks\\startup\\Bye\n"
+    );
+}
+
+#[test]
+fn dry_run_update_includes_normalized_xml_diff() {
+    let path = "\\WinTasks\\cron\\Hello";
+    let mut fake = FakeSchtasks::new();
+    fake.extra_query_xml = format!(
+        "<Task xmlns=\"{NS}\" version=\"1.2\"><RegistrationInfo><Description>managed-by: wintasks; def-hash: {hash}</Description><URI>/WinTasks/cron/Hello</URI></RegistrationInfo><Actions><Exec><Command>cmd.exe</Command><Arguments>/c echo old</Arguments></Exec></Actions></Task>",
+        NS = wintasks::xml::TASK_XML_NS,
+        hash = "0".repeat(64),
+    );
+    let mut o = opts();
+    o.dry_run = true;
+    let cap = capture(ONE_TASK, &o, &mut fake);
+    assert_eq!(cap.code, 0);
+    assert!(
+        cap.out
+            .starts_with(&format!("update {path}\n--- current\n+++ desired\n@@\n"))
+    );
+    assert!(
+        cap.out
+            .contains("-      <Arguments>/c echo old</Arguments>")
+    );
+    assert!(cap.out.contains("+      <Arguments>/c echo hi</Arguments>"));
+    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
+}
+
+#[test]
+fn dry_run_delete_includes_diff_against_empty_document() {
+    let mut fake = FakeSchtasks::new();
+    fake.tasks
+        .insert("\\WinTasks\\cron\\Gone".to_string(), Some("0".repeat(64)));
+    let mut o = opts();
+    o.dry_run = true;
+    o.prune = true;
+    let cap = capture("[]\n", &o, &mut fake);
+    assert_eq!(cap.code, 0);
+    assert!(
+        cap.out
+            .starts_with("delete \\WinTasks\\cron\\Gone\n--- current\n+++ desired\n@@\n")
+    );
+    assert!(cap.out.contains("-<Task"));
     assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
 }
 

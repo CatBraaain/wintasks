@@ -8,12 +8,159 @@ use crate::trigger::{ScheduleKind, TriggerXml, build_triggers, month_element, we
 use chrono::{NaiveDateTime, Timelike};
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::{Reader, XmlVersion};
 
 pub const TASK_XML_NS: &str = "http://schemas.microsoft.com/windows/2004/02/mit/task";
 
 pub struct TaskXml {
     pub xml: String,
     pub def_hash: String,
+}
+
+/// Normalizes Task Scheduler XML for dry-run comparisons.
+pub fn normalized_task_xml(xml: &str) -> Result<String, String> {
+    if xml.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .map_err(|e| e.to_string())?;
+
+    let mut elements = Vec::new();
+    let mut excluded_depth = 0;
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Start(event) => {
+                let name = local_name(event.name().as_ref());
+                let is_excluded = is_excluded(elements.last(), &name);
+                elements.push(name);
+                if excluded_depth > 0 {
+                    excluded_depth += 1;
+                } else if is_excluded {
+                    excluded_depth = 1;
+                } else {
+                    writer
+                        .write_event(Event::Start(sorted_start(&event)?))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            Event::Empty(event) if excluded_depth == 0 => {
+                let name = local_name(event.name().as_ref());
+                if !is_excluded(elements.last(), &name) {
+                    writer
+                        .write_event(Event::Empty(sorted_start(&event)?))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            Event::End(event) => {
+                if excluded_depth > 0 {
+                    excluded_depth -= 1;
+                } else {
+                    writer
+                        .write_event(Event::End(event.into_owned()))
+                        .map_err(|e| e.to_string())?;
+                }
+                elements.pop();
+            }
+            Event::Text(event) if excluded_depth == 0 => {
+                if !event.xml_content(XmlVersion::Explicit1_0).trim().is_empty() {
+                    writer
+                        .write_event(Event::Text(event.into_owned()))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            Event::Decl(_) => {}
+            Event::Eof => break,
+            event if excluded_depth == 0 => {
+                writer
+                    .write_event(event.into_owned())
+                    .map_err(|e| e.to_string())?;
+            }
+            _ => {}
+        }
+    }
+    String::from_utf8(writer.into_inner()).map_err(|e| e.to_string())
+}
+
+/// Returns a no-context unified diff of normalized Task Scheduler XML.
+pub fn task_xml_diff(current: &str, desired: &str) -> Result<Option<String>, String> {
+    let current = normalized_task_xml(current)?;
+    let desired = normalized_task_xml(desired)?;
+    if current == desired {
+        return Ok(None);
+    }
+
+    let current_lines: Vec<_> = current.lines().collect();
+    let desired_lines: Vec<_> = desired.lines().collect();
+    let mut suffixes = vec![vec![0; desired_lines.len() + 1]; current_lines.len() + 1];
+    for current_index in (0..current_lines.len()).rev() {
+        for desired_index in (0..desired_lines.len()).rev() {
+            suffixes[current_index][desired_index] =
+                if current_lines[current_index] == desired_lines[desired_index] {
+                    suffixes[current_index + 1][desired_index + 1] + 1
+                } else {
+                    suffixes[current_index + 1][desired_index]
+                        .max(suffixes[current_index][desired_index + 1])
+                };
+        }
+    }
+
+    let mut diff = String::from("--- current\n+++ desired\n@@\n");
+    let (mut current_index, mut desired_index) = (0, 0);
+    while current_index < current_lines.len() || desired_index < desired_lines.len() {
+        if current_index < current_lines.len()
+            && desired_index < desired_lines.len()
+            && current_lines[current_index] == desired_lines[desired_index]
+        {
+            current_index += 1;
+            desired_index += 1;
+        } else if desired_index == desired_lines.len()
+            || (current_index < current_lines.len()
+                && suffixes[current_index + 1][desired_index]
+                    >= suffixes[current_index][desired_index + 1])
+        {
+            diff.push('-');
+            diff.push_str(current_lines[current_index]);
+            diff.push('\n');
+            current_index += 1;
+        } else {
+            diff.push('+');
+            diff.push_str(desired_lines[desired_index]);
+            diff.push('\n');
+            desired_index += 1;
+        }
+    }
+    Ok(Some(diff))
+}
+
+fn is_excluded(parent: Option<&String>, name: &str) -> bool {
+    matches!(
+        (parent.map(String::as_str), name),
+        (Some("RegistrationInfo"), "Description") | (Some("CalendarTrigger"), "StartBoundary")
+    )
+}
+
+fn local_name(name: &str) -> String {
+    name.rsplit_once(':')
+        .map_or_else(|| name.to_string(), |(_, local)| local.to_string())
+}
+
+fn sorted_start(event: &BytesStart<'_>) -> Result<BytesStart<'static>, String> {
+    let mut attributes = event
+        .attributes()
+        .map(|attribute| attribute.map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    attributes.sort_by(|left, right| left.key.as_ref().cmp(right.key.as_ref()));
+
+    let mut sorted = BytesStart::new(event.name().as_ref().to_owned());
+    for attribute in attributes {
+        sorted.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+    }
+    Ok(sorted)
 }
 
 #[derive(Debug)]
@@ -285,6 +432,18 @@ mod tests {
             }],
             setting: None,
         }
+    }
+
+    #[test]
+    fn normalized_diff_ignores_excluded_elements_and_formatting() {
+        let current = r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task z="last" a="first">
+  <RegistrationInfo><Description>old hash</Description></RegistrationInfo>
+  <Triggers><CalendarTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary><Keep>same</Keep></CalendarTrigger></Triggers>
+</Task>"#;
+        let desired = r#"<Task a="first" z="last"><RegistrationInfo><Description>new hash</Description></RegistrationInfo><Triggers><CalendarTrigger><StartBoundary>2030-01-01T00:00:00</StartBoundary><Keep>same</Keep></CalendarTrigger></Triggers></Task>"#;
+
+        assert_eq!(task_xml_diff(current, desired).unwrap(), None);
     }
 
     #[test]

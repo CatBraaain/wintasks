@@ -26,7 +26,7 @@ cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタ
 
 | キー | 必須 | 値 |
 |---|---|---|
-| `name` | 必須 | タスク名。ファイル内で重複してはならない |
+| `name` | 必須 | タスク定義名。ファイル内で重複してはならない |
 | `trigger` | 必須 | トリガー定義 1 個、またはその配列 |
 | `action` | 必須 | アクション定義 1 個、またはその配列 |
 | `setting` | 任意 | 実行アカウント設定 |
@@ -53,9 +53,11 @@ setting 定義:
 | `run_as` | 任意 | 真偽値。文字列 `"true"` / `"false"` も真偽値として受容する |
 | `logon_type` | 任意 | `interactive_token` / `s4u` のいずれか。未指定は `interactive_token` |
 
-## タスク名
+## タスクパス
 
-Task Scheduler 上のタスク名は `<mount>\<先頭トリガーの type>\<name>` である。トリガーが配列のとき、先頭要素の type を使う。
+Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガーの type>\<name>` である。トリガーが配列のとき、先頭要素の type を使う。`--mount WinTasks` の `name: backup`、先頭トリガーが `cron` のタスクパスは `\WinTasks\cron\backup` である。
+
+タスク定義の `name` はタスクパスの末尾要素である。
 
 ## XML 生成
 
@@ -123,7 +125,7 @@ Task Scheduler 上のタスク名は `<mount>\<先頭トリガーの type>\<name
 
 ### render の出力
 
-タスクごとに、区切り行 `--- <タスク名> ---` と XML 文書をこの順で stdout へ出力する。各ブロックは区切り行 + 改行、XML 文書 + 改行である。タスクの間に空行は入らない。タスク定義 0 件のときは何も出力しない。
+タスクごとに、区切り行 `--- <name> ---`（`<name>` はタスク定義の `name` 値）と XML 文書をこの順で stdout へ出力する。各ブロックは区切り行 + 改行、XML 文書 + 改行である。タスクの間に空行は入らない。タスク定義 0 件のときは何も出力しない。
 
 ### トリガーの XML 変換
 
@@ -249,21 +251,40 @@ trigger 種別の選択:
 
 | 条件 | 分類 | apply の動作 |
 |---|---|---|
-| 同名の管理下タスクがない | `create` | `schtasks /Create /XML <xml> /TN <タスク名> /F` で登録する |
-| 同名があり def-hash が異なる | `update` | 同上（/F で上書き） |
-| 同名があり def-hash が一致する | `no-change` | 何もしない |
+| 同一タスクパスの管理下タスクがない | `create` | `schtasks /Create /XML <xml> /TN <タスクパス> /F` で登録する |
+| 同一タスクパスがあり def-hash が異なる | `update` | 同上（/F で上書き） |
+| 同一タスクパスがあり def-hash が一致する | `no-change` | 何もしない |
 
-生成したタスク名と同名の非管理下タスク（マーカーなし）がシステムに存在する場合は、そのタスクを登録せずエラー報告して処理を続行する（非管理下タスクを上書きしない）。
+生成したタスクパスと同一パスの非管理下タスク（マーカーなし）がシステムに存在する場合は、そのタスクを登録せずエラー報告して処理を続行する（非管理下タスクを上書きしない）。
 
 管理下タスクの Description から def-hash を読み取れない場合（手編集された管理タスク等）は、def-hash 不一致として扱い update する。
 
-4. `--prune` 指定時、管理下タスクのうちタスク定義から生成したタスク名の集合に含まれないものを `schtasks /Delete /TN <タスク名> /F` で削除する
+4. `--prune` 指定時、管理下タスクのうちタスク定義から生成したタスクパスの集合に含まれないものを `schtasks /Delete /TN <タスクパス> /F` で削除する
 5. 実行した処理をタスクごとに報告する
 
-- `--dry-run` では step 2 までを実行し、各タスクの分類（`--prune` 時は削除対象も）を表示する。システムは変更しない。衝突エラーがある場合は非ゼロで終了する
-- schtasks の create / delete の呼び出し失敗（権限不足など）は処理を続行し、最後に失敗したタスク名と schtasks のエラーを報告して非ゼロ終了する
+- `--dry-run` では step 2 までを実行し、各タスクの分類（`--prune` 時は削除対象も）を表示する。`update` と `delete` の分類行には正規化した XML の unified diff を続ける（「### --dry-run の diff 表示」）。システムは変更しない。衝突エラーがある場合は非ゼロで終了する
+- schtasks の create / delete の呼び出し失敗（権限不足など）は処理を続行し、最後に失敗したタスクパスと schtasks のエラーを報告して非ゼロ終了する
 - `/Query` の失敗は分類ができないため、即時にエラー終了する
 - apply は管理者権限へ自動昇格しない
+
+### --dry-run の diff 表示
+
+`--dry-run` では、`update` の分類行の下に既存の管理下タスクと生成 XML の unified diff を出力し、`delete` の分類行の下に既存の管理下タスクと空文書の unified diff を出力する。diff は各分類行の直後から始まり、stdout に出力する。`create` と `no-change` には diff を出力しない。
+
+比較前に XML を正規化する。正規化は XML 宣言を UTF-8 に統一し、空白だけのテキストを除去し、属性名を辞書順に並べ、要素・属性を同じインデントと改行でシリアライズする。XML の要素順と、除外対象以外の要素内容を保持する。`RegistrationInfo/Description` と `CalendarTrigger/StartBoundary` は比較から除外する。schtasks が返すそれ以外の要素は比較対象に含める。
+
+`update` の diff は既存 XML を `--- current`、生成 XML を `+++ desired` とする unified diff である。`delete` の diff は既存 XML を `--- current`、空文書を `+++ desired` とする。正規化後に差分がない `update` では、unified diff の代わりに `  (no diff)` を出力する。
+
+差分の出力例は次のとおりである。
+
+```text
+update \WinTasks\cron\backup
+--- current
++++ desired
+@@
+-    <Arguments>--full</Arguments>
++    <Arguments>--full --verify</Arguments>
+```
 
 ### 終了コード
 
@@ -281,14 +302,14 @@ trigger 種別の選択:
 
 - ファイル読み取り失敗: `wintasks: <path>: <入出力エラーの内容>`
 - YAML パースエラー: 発生位置が分かるときは `wintasks: <file>:<line>:<col>: <原因>`、分からないときは `wintasks: <file>: <原因>`。name 重複は `wintasks: <file>: duplicate task name `<name>``、空または null ドキュメントは `wintasks: <file>: no task definitions found (file is empty or null)`
-- XML 生成エラー: `wintasks: <path>: XML generation failed for task `<タスク名>`: <原因>`
+- XML 生成エラー: `wintasks: <path>: XML generation failed for task `<name>`: <原因>`
 - `/Query` の失敗: `wintasks: schtasks /Query /XML failed: <schtasks の標準エラー出力>`
 
 usage エラーは `wintasks: <メッセージ>` に続けて usage を stderr へ出力する。
 
 処理を続行したエラーは、すべての処理の後に 1 行ずつ出力する。
 
-- 衝突エラー: `error: <タスク名>: a task with this name exists but is not managed by wintasks; not registered`
-- schtasks の失敗: `error: schtasks /Create /TN <タスク名> failed: <schtasks の標準エラー出力>` または `error: schtasks /Delete /TN <タスク名> failed: <schtasks の標準エラー出力>`
+- 衝突エラー: `error: <タスクパス>: a task with this name exists but is not managed by wintasks; not registered`
+- schtasks の失敗: `error: schtasks /Create /TN <タスクパス> failed: <schtasks の標準エラー出力>` または `error: schtasks /Delete /TN <タスクパス> failed: <schtasks の標準エラー出力>`
 
-処理の報告は stdout へ出力する。1 行が `<分類> <タスク名>` の形式で、分類は `create` / `update` / `no-change` / `delete` である。`--dry-run` では分類を YAML の定義順に、その後 `delete` をタスク名の昇順で出力する。実行時は各処理の完了ごとに出力する。
+処理の報告は stdout へ出力する。1 行が `<分類> <タスクパス>` の形式で、分類は `create` / `update` / `no-change` / `delete` である。`--dry-run` では分類を YAML の定義順に、その後 `delete` をタスクパスの昇順で出力する。実行時は各処理の完了ごとに出力する。
