@@ -3,7 +3,6 @@
 pub mod apply;
 pub mod cron;
 pub mod def;
-pub mod render;
 pub mod schtasks;
 pub mod trigger;
 pub mod xml;
@@ -14,12 +13,11 @@ use chrono::Local;
 
 use crate::apply::{SyncOptions, run_sync};
 use crate::def::parse_defs;
-use crate::render::render_output;
 use crate::schtasks::CommandSchtasks;
 
-const DEFINITIONS_FILE: &str = "wintasks.yaml";
-pub const USAGE: &str = "usage: wintasks [--dry-run | --render | --help | -h]";
-pub const HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks [OPTIONS]\n\nOptions:\n  --dry-run    Show planned changes without modifying the system\n  --render     Render task XML without querying or modifying the system\n  -h, --help   Show this help message\n";
+const DEFAULT_DEFINITIONS_FILE: &str = "wintasks.yaml";
+pub const USAGE: &str = "usage: wintasks [--dry-run] [--path FILE] [--help | -h]";
+pub const HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks [OPTIONS]\n\nOptions:\n  --dry-run    Show planned changes without modifying the system\n  --path FILE  Read task definitions from FILE (default: wintasks.yaml)\n  -h, --help   Show this help message\n";
 
 pub fn now_local() -> chrono::NaiveDateTime {
     Local::now().naive_local()
@@ -34,38 +32,23 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         let _ = out.write_all(HELP.as_bytes());
         return 0;
     }
-    let definitions_text = match std::fs::read_to_string(DEFINITIONS_FILE) {
+    let definitions_text = match std::fs::read_to_string(&options.path) {
         Ok(text) => text,
-        Err(read_error) => return error(&format!("{DEFINITIONS_FILE}: {read_error}"), err),
+        Err(read_error) => return error(&format!("{}: {read_error}", options.path), err),
     };
-    let definitions = match parse_defs(&definitions_text, DEFINITIONS_FILE) {
+    let definitions = match parse_defs(&definitions_text, &options.path) {
         Ok(definitions) => definitions,
         Err(parse_error) => return error(&parse_error.to_string(), err),
     };
-    let now = now_local();
-
-    if options.render {
-        return match render_output(&definitions.tasks, now) {
-            Ok(xml) => {
-                let _ = out.write_all(xml.as_bytes());
-                0
-            }
-            Err(xml_error) => error(
-                &format!("{DEFINITIONS_FILE}: XML generation failed for {xml_error}"),
-                err,
-            ),
-        };
-    }
-
     let mut scheduler = CommandSchtasks;
     run_sync(
         &definitions,
-        DEFINITIONS_FILE,
+        &options.path,
         &SyncOptions {
             dry_run: options.dry_run,
         },
         &mut scheduler,
-        now,
+        now_local(),
         out,
         err,
     ) as u8
@@ -74,26 +57,29 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> u8 {
 #[derive(Debug, PartialEq, Eq)]
 pub struct CliOptions {
     pub dry_run: bool,
-    pub render: bool,
+    pub path: String,
     pub help: bool,
 }
 
 pub fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
     let mut options = CliOptions {
         dry_run: false,
-        render: false,
+        path: DEFAULT_DEFINITIONS_FILE.to_string(),
         help: false,
     };
-    for argument in args {
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--dry-run" => options.dry_run = true,
-            "--render" => options.render = true,
+            "--path" => {
+                options.path = arguments
+                    .next()
+                    .ok_or_else(|| "--path requires a file path".to_string())?
+                    .clone();
+            }
             "--help" | "-h" => options.help = true,
             _ => return Err(format!("unexpected argument `{argument}`")),
         }
-    }
-    if !options.help && options.dry_run && options.render {
-        return Err("--dry-run and --render cannot be used together".to_string());
     }
     Ok(options)
 }

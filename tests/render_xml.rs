@@ -3,7 +3,6 @@ mod common;
 use chrono::NaiveDate;
 use common::definitions;
 use wintasks::def::parse_defs;
-use wintasks::render::render_output;
 use wintasks::xml::{normalized_task_xml, render_task_xml};
 
 fn now() -> chrono::NaiveDateTime {
@@ -77,20 +76,18 @@ fn renders_the_spec_example_as_the_exact_full_document() {
 }
 
 #[test]
-fn renders_all_trigger_types_actions_and_empty_output() {
+fn renders_all_trigger_types_and_actions() {
     let yaml = definitions(
         "  - name: many\n    trigger:\n      - { type: startup, value: '01:30' }\n      - { type: boot, value: '00:30' }\n      - { type: once, value: '2030-06-01' }\n      - { type: now, value: unused }\n    action:\n      - { command: cmd.exe }\n      - { command: 'C:\\Tools\\a.exe', args: --one }\n",
     );
     let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
-    let output = render_output(&definitions.tasks, now()).unwrap();
-    assert!(output.starts_with("--- many ---\n"));
+    let output = render_task_xml(&definitions.tasks[0], now()).unwrap();
     assert!(output.contains("<Delay>PT1H30M</Delay>"));
     assert!(output.contains("<Delay>PT30M</Delay>"));
     assert!(output.contains("<StartBoundary>2030-06-01T00:00:00</StartBoundary>"));
     assert!(output.contains("<RegistrationTrigger/>"));
     assert_eq!(output.matches("<Exec>").count(), 2);
     assert!(!output.contains("<Arguments></Arguments>"));
-    assert!(render_output(&[], now()).unwrap().is_empty());
     let trigger_positions = [
         output.find("<Delay>PT1H30M</Delay>").unwrap(),
         output.find("<Delay>PT30M</Delay>").unwrap(),

@@ -4,7 +4,7 @@ cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタ
 
 タスクの管理対象は Description ではなく mount folder で決まる。指定した mount folder 配下のタスクは、Description の内容にかかわらずこの CLI が管理する。mount folder の外にあるタスクは変更しない。
 
-コマンドの既定動作はサブコマンドなしの `wintasks` であり、YAML とシステムを同期する。`wintasks --dry-run` はシステムを変更せず差分を表示し、`wintasks --render` は XML を生成して stdout へ出力する。`--dry-run` と `--render` は同時に指定できない。`--help` と `-h` は同じヘルプ表示として扱い、他のオプションと同時に指定した場合もヘルプを優先する。
+コマンドの既定動作はサブコマンドなしの `wintasks` であり、YAML とシステムを同期する。`wintasks --dry-run` はシステムを変更せず差分を表示する。`--path FILE` は読み込む定義ファイルを指定し、省略時は `wintasks.yaml` を使う。`--help` と `-h` は同じヘルプ表示として扱い、他のオプションと同時に指定した場合もヘルプを優先する。
 
 オプション:
 
@@ -12,7 +12,7 @@ cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタ
 |---|---|---|
 | なし | — | YAML と mount folder を同期する |
 | `--dry-run` | なし | システムを変更せず変更計画と差分を表示する |
-| `--render` | なし | YAML の各タスクを XML に変換して表示する。システムを変更しない |
+| `--path FILE` | `wintasks.yaml` | FILE の YAML を定義ファイルとして読み込む |
 | `-h`, `--help` | なし | ヘルプを stdout に表示して終了する。定義ファイルを読み込まず、システムを変更しない |
 
 `wintasks --help` または `wintasks -h` は終了コード 0 で、次の文字列を stdout に出力する。出力の各行と末尾の改行を含めて正本とする。
@@ -24,13 +24,13 @@ Usage: wintasks [OPTIONS]
 
 Options:
   --dry-run    Show planned changes without modifying the system
-  --render     Render task XML without querying or modifying the system
+  --path FILE  Read task definitions from FILE (default: wintasks.yaml)
   -h, --help   Show this help message
 ```
 
-`--help` または `-h` は `--dry-run` または `--render` と同時に指定でき、ヘルプだけを出力する。認識できない引数を含む場合は、ヘルプオプションがあっても usage エラーとなる。`--dry-run` と `--render` の組み合わせは、ヘルプオプションがない場合に usage エラーとなる。
+`--help` または `-h` は `--dry-run` または `--path FILE` と同時に指定でき、ヘルプだけを出力する。認識できない引数を含む場合は、ヘルプオプションがあっても usage エラーとなる。`--path=FILE` 形式は受け付けず、`--path FILE` 形式を使う。
 
-定義ファイルは `wintasks.yaml` 固定である。引数が不正な場合は usage を表示して非ゼロ終了する。
+定義ファイルは `--path FILE` で指定し、省略時は `wintasks.yaml` を使う。FILE が相対パスのときは、コマンド実行時のカレントディレクトリから解決する。読み込みまたはパースに失敗したときは、指定した FILE をエラーに表示する。引数が不正な場合は usage を表示して非ゼロ終了する。
 
 ## YAML スキーマ
 
@@ -78,7 +78,7 @@ Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガー�
 
 ## XML 生成
 
-既定動作と `--render` は同一の変換を使う。YAML から生成される XML は schtasks の `/Create /XML` に受理される Task Scheduler XML 形式であり、次の書式と内容を持つ。
+既定動作は YAML から XML を生成する。生成される XML は schtasks の `/Create /XML` に受理される Task Scheduler XML 形式であり、次の書式と内容を持つ。
 
 - XML 宣言は `<?xml version="1.0" encoding="UTF-8"?>`。出力は UTF-8 である
 - インデントは 2 スペース。子要素を持たない要素は `<X/>` 形式で書く
@@ -139,10 +139,6 @@ tasks:
   </Actions>
 </Task>
 ```
-
-### `--render` の出力
-
-タスクごとに、区切り行 `--- <name> ---`（`<name>` はタスク定義の `name` 値）と XML 文書をこの順で stdout へ出力する。各ブロックは区切り行 + 改行、XML 文書 + 改行である。タスクの間に空行は入らない。タスク定義 0 件のときは何も出力しない。
 
 ### トリガーの XML 変換
 
@@ -264,11 +260,10 @@ tasks:
 
 `wintasks` は次の順序で YAML と mount folder を同期する。
 
-1. `wintasks.yaml` を読み込みパースする。パースエラー、mount の形式エラー、name 重複、XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する。
-2. `--render` 指定時は、各タスクの XML を定義順に「`--- <name> ---`」の区切り行とともに stdout へ出力して終了する。システムの query と変更は行わない。
-3. `schtasks /Query /XML` でシステム上の全タスクの XML を取得する。`/Query` の出力は BOM 付き UTF-16 または UTF-8 で返るため、BOM で判別してデコードする。BOM がなければ UTF-8 として読む。query 出力の 1 文書をパースできなかったときは、その文書以降を無視し、それまでに読めたタスクだけで処理を続行する。
-4. タスクパスが mount folder 自身またはその子フォルダにあるタスクだけを同期対象とする。mount folder の外にあるタスクは分類・変更しない。
-5. desired state の各タスクと同期対象の既存タスクをタスクパスで比較し、次のように分類する。
+1. `--path FILE` で指定されたファイル（省略時は `wintasks.yaml`）を読み込みパースする。パースエラー、mount の形式エラー、name 重複、XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する。
+2. `schtasks /Query /XML` でシステム上の全タスクの XML を取得する。`/Query` の出力は BOM 付き UTF-16 または UTF-8 で返るため、BOM で判別してデコードする。BOM がなければ UTF-8 として読む。query 出力の 1 文書をパースできなかったときは、その文書以降を無視し、それまでに読めたタスクだけで処理を続行する。
+3. タスクパスが mount folder 自身またはその子フォルダにあるタスクだけを同期対象とする。mount folder の外にあるタスクは分類・変更しない。
+4. desired state の各タスクと同期対象の既存タスクをタスクパスで比較し、次のように分類する。
 
 | 条件 | 分類 | 同期時の動作 |
 |---|---|---|

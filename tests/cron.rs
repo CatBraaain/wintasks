@@ -3,7 +3,7 @@ mod common;
 use chrono::NaiveDate;
 use common::definitions;
 use wintasks::def::parse_defs;
-use wintasks::render::render_output;
+use wintasks::xml::render_task_xml;
 
 fn render(expression: &str) -> Result<String, String> {
     let yaml = definitions(&format!(
@@ -14,7 +14,7 @@ fn render(expression: &str) -> Result<String, String> {
         .unwrap()
         .and_hms_opt(10, 0, 0)
         .unwrap();
-    render_output(&definitions.tasks, now).map_err(|error| error.to_string())
+    render_task_xml(&definitions.tasks[0], now).map_err(|error| error.to_string())
 }
 
 #[test]
