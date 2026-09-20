@@ -1,28 +1,29 @@
 # wintasks CLI spec
 
-cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタスク登録 XML に変換し、タスクの登録・更新・削除を宣言的に管理する Windows 向け CLI。タスク定義 YAML が desired state であり、`apply` 実行後にシステム上の管理下タスクが YAML の定義に一致する。
+cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタスク登録 XML に変換し、YAML に宣言した mount folder 配下のタスクを登録・更新・削除する Windows 向け CLI。YAML が mount folder と desired state を定め、コマンド実行後にその配下のタスクが YAML の定義に一致する。
 
-管理下タスクとは、Description が `managed-by: wintasks;` で始まるタスクである。この CLI は管理下タスクのみを更新・削除する。
+タスクの管理対象は Description ではなく mount folder で決まる。指定した mount folder 配下のタスクは、Description の内容にかかわらずこの CLI が管理する。mount folder の外にあるタスクは変更しない。
 
-コマンドは 2 つである。
+コマンドの既定動作はサブコマンドなしの `wintasks` であり、YAML とシステムを同期する。`wintasks --dry-run` はシステムを変更せず差分を表示し、`wintasks --render` は XML を生成して stdout へ出力する。`--dry-run` と `--render` は同時に指定できない。
 
-- `wintasks render` — YAML を XML に変換し stdout へ出力する。システムを変更しない純粋変換器である
-- `wintasks apply` — XML を生成し `schtasks` でシステムへ反映する
+オプション:
 
-共通オプション:
+| オプション | 既定値 | 意味 |
+|---|---|---|
+| なし | — | YAML と mount folder を同期する |
+| `--dry-run` | なし | システムを変更せず変更計画と差分を表示する |
+| `--render` | なし | YAML の各タスクを XML に変換して表示する。システムを変更しない |
 
-| オプション | 適用コマンド | 既定値 | 意味 |
-|---|---|---|---|
-| `--path <path>` | render / apply | `wintasks.yaml` | タスク定義 YAML ファイルのパス。ディレクトリは指定できない。重複指定は後の値が有効 |
-| `--mount <folder>` | apply | `WinTasks` | タスク登録先のフォルダ |
-| `--dry-run` | apply | なし | システムを変更せず変更計画を表示する |
-| `--prune` | apply | なし | YAML 定義に存在しない管理下タスクを削除する |
-
-引数が不正な場合は usage を表示して非ゼロ終了する。
+定義ファイルは `wintasks.yaml` 固定である。引数が不正な場合は usage を表示して非ゼロ終了する。
 
 ## YAML スキーマ
 
-1 ファイルに複数のタスク定義を書ける。ファイル全体はタスク定義のリストである。空のファイルや null ドキュメントはエラーとする。空リスト `[]` はタスク 0 件の正常な desired state として受容する。キーは snake_case であり、定義されていないキーが現れたらエラーとする。
+ファイル全体は `mount` と `tasks` を持つマッピングである。`tasks` に複数のタスク定義を書ける。空のファイルや null ドキュメントはエラーとする。`tasks: []` はタスク 0 件の正常な desired state として受容する。キーは snake_case であり、定義されていないキーが現れたらエラーとする。
+
+| キー | 必須 | 値 |
+|---|---|---|
+| `mount` | 必須 | Task Scheduler の root ではないフォルダパス。1 個以上のフォルダ名を `\` で区切った相対パスとし、空文字、`\`、先頭または末尾が `\` の値はエラーとする |
+| `tasks` | 必須 | タスク定義のリスト |
 
 | キー | 必須 | 値 |
 |---|---|---|
@@ -55,18 +56,18 @@ setting 定義:
 
 ## タスクパス
 
-Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガーの type>\<name>` である。トリガーが配列のとき、先頭要素の type を使う。`--mount WinTasks` の `name: backup`、先頭トリガーが `cron` のタスクパスは `\WinTasks\cron\backup` である。
+Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガーの type>\<name>` である。トリガーが配列のとき、先頭要素の type を使う。`mount: WinTasks`、`name: backup`、先頭トリガーが `cron` のタスクパスは `\WinTasks\cron\backup` である。
 
-タスク定義の `name` はタスクパスの末尾要素である。
+タスク定義の `name` はタスクパスの末尾要素である。同期対象は mount folder 自身と、そのすべての子フォルダにあるタスクである。desired state にない同期対象タスクは削除する。
 
 ## XML 生成
 
-`render` と `apply` は同一の変換を使う。YAML から生成される XML は schtasks の `/Create /XML` に受理される Task Scheduler XML 形式であり、次の書式と内容を持つ。
+既定動作と `--render` は同一の変換を使う。YAML から生成される XML は schtasks の `/Create /XML` に受理される Task Scheduler XML 形式であり、次の書式と内容を持つ。
 
 - XML 宣言は `<?xml version="1.0" encoding="UTF-8"?>`。出力は UTF-8 である
 - インデントは 2 スペース。子要素を持たない要素は `<X/>` 形式で書く
 - ルート要素は `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`。ルートの直下要素の順序は RegistrationInfo → Triggers → Principals → Settings → Actions とする
-- `RegistrationInfo/Description` は `managed-by: wintasks; def-hash: <def-hash>`。`<def-hash>` はトリガー・アクション・setting の定義内容から算出した SHA-256 の 64 桁 16 進数である。算出にはデフォルト解決後の実効値を使う。そのため `working_directory` 未指定と親ディレクトリ明示、`logon_type` 未指定と `interactive_token` 明示は同一 hash になる。同一定義は同一 hash、実効値が 1 文字でも異なれば異なる hash になる。def-hash は name と mount を含まない
+- `RegistrationInfo` に管理対象を示す Description やハッシュを出力しない。タスクの管理対象判定と変更判定は mount folder と XML の内容で行う
 - `Principals/Principal` は `RunLevel` と `LogonType` を持つ。`RunLevel` は `run_as: true` で `Highest`、それ以外で `LeastPrivilege`。`LogonType` は setting の `logon_type` を反映する（`s4u` → `S4U`、`interactive_token` → `InteractiveToken`）
 - `Settings` は次の値を持つ。`StartWhenAvailable=true`、`DisallowStartIfOnBatteries=false`、`StopIfGoingOnBatteries=false`。これらにより、発火時刻を逃したタスクはできるだけ早く開始され、バッテリ駆動でも実行・継続される。他の Settings 要素は Task Scheduler XML の既定値とする
 - `Actions` はアクション定義ごとに 1 個の `<Exec>` を YAML の順序どおり並べる。`Command` は `command`、`Arguments` は `args`（未指定なら要素を書かない）、`WorkingDirectory` は `working_directory` の決定結果（決まらないなら要素を書かない）
@@ -76,22 +77,22 @@ Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガー�
 次の YAML 定義を、実行日が 2026-09-20 で実行時刻が 2026-09-20T09:00:00 より前である場合に変換した出力は:
 
 ```yaml
-- name: backup
-  trigger:
-    type: cron
-    value: "0 9 * * MON"
-  action:
-    command: C:\Tools\backup.exe
-    args: --full
-    working_directory: C:\Backup
+mount: WinTasks
+tasks:
+  - name: backup
+    trigger:
+      type: cron
+      value: "0 9 * * MON"
+    action:
+      command: C:\Tools\backup.exe
+      args: --full
+      working_directory: C:\Backup
 ```
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>managed-by: wintasks; def-hash: d267337fd4bff92644f1a6b00cd8e7595eab43031389a2cef9947ece4198ab33</Description>
-  </RegistrationInfo>
+  <RegistrationInfo/>
   <Triggers>
     <CalendarTrigger>
       <StartBoundary>2026-09-20T09:00:00</StartBoundary>
@@ -123,7 +124,7 @@ Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガー�
 </Task>
 ```
 
-### render の出力
+### `--render` の出力
 
 タスクごとに、区切り行 `--- <name> ---`（`<name>` はタスク定義の `name` 値）と XML 文書をこの順で stdout へ出力する。各ブロックは区切り行 + 改行、XML 文書 + 改行である。タスクの間に空行は入らない。タスク定義 0 件のときは何も出力しない。
 
@@ -204,7 +205,7 @@ trigger 種別の選択:
 
 ### StartBoundary の決定と過去補正
 
-- 各 trigger の StartBoundary の日付部分は render / apply 実行日とする
+- 各 trigger の StartBoundary の日付部分は `wintasks` 実行日とする
 - cron トリガーの StartBoundary が実行時点のローカル時刻以下なら、StartBoundary を +1 日する。1 回のみ補正し、補正後も過去ならそのままにする
 - 補正は `cron` type の trigger のみに適用し、`startup` / `boot` / `once` / `now` には適用しない
 
@@ -215,9 +216,11 @@ trigger 種別の選択:
 トリガー定義の行は、テスト側が次の最小タスクでラップする:
 
 ```yaml
-- name: sample
-  trigger: { type: <type>, value: "<value>" }
-  action: { command: cmd.exe }
+mount: Test
+tasks:
+  - name: sample
+    trigger: { type: <type>, value: "<value>" }
+    action: { command: cmd.exe }
 ```
 
 実行時刻のセルは cron の行では必須であり、それ以外の行では無視される。
@@ -233,7 +236,7 @@ trigger 種別の選択:
 | `cron` | `*/15 9-17 * * *` | 2026-01-15 10:00 | `<CalendarTrigger><StartBoundary>2026-01-16T09:00:00</StartBoundary><Repetition><Interval>PT15M</Interval><Duration>PT9H</Duration></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>` |
 | `cron` | `0,30 9,21 * * *` | 2026-01-15 10:00 | `<CalendarTrigger><StartBoundary>2026-01-16T09:00:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-16T09:30:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-15T21:00:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-15T21:30:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>` |
 
-アクション定義の行は、トリガーを `{ type: now, value: "x" }` としてトリガーと同じ形でラップする。空のセルのキーは書かない。
+アクション定義の行は、トリガーを `{ type: now, value: "x" }` として同じ YAML の `tasks` 配下でラップする。空のセルのキーは書かない。
 
 | command | args | working_directory | 期待 XML |
 |---|---|---|---|
@@ -241,39 +244,37 @@ trigger 種別の選択:
 | `C:\Tools\a.exe` | `--one` | | `<Exec><Command>C:\Tools\a.exe</Command><Arguments>--one</Arguments><WorkingDirectory>C:\Tools</WorkingDirectory></Exec>` |
 | `C:\Tools\a.exe` | | `C:\Data` | `<Exec><Command>C:\Tools\a.exe</Command><WorkingDirectory>C:\Data</WorkingDirectory></Exec>` |
 
-## apply
+## 同期
 
-次の順序で処理する。
+`wintasks` は次の順序で YAML と mount folder を同期する。
 
-1. YAML を読み込みパースする。パースエラー・name 重複・XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する
-2. `schtasks /Query /XML` でシステム上の全タスクの XML を取得し、Description が `managed-by: wintasks;` で始まるタスクのみを管理下タスクと判定する。マーカーの照合はフォルダを問わない。`/Query` の出力は BOM 付き UTF-16 または UTF-8 で返るため、BOM で判別してデコードする。BOM がなければ UTF-8 として読む。query 出力の 1 文書をパースできなかったときは、その文書以降を無視し、それまでに読めたタスクだけで処理を続行する
-3. 各タスク定義を管理下タスクと比較し分類する
+1. `wintasks.yaml` を読み込みパースする。パースエラー、mount の形式エラー、name 重複、XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する。
+2. `--render` 指定時は、各タスクの XML を定義順に「`--- <name> ---`」の区切り行とともに stdout へ出力して終了する。システムの query と変更は行わない。
+3. `schtasks /Query /XML` でシステム上の全タスクの XML を取得する。`/Query` の出力は BOM 付き UTF-16 または UTF-8 で返るため、BOM で判別してデコードする。BOM がなければ UTF-8 として読む。query 出力の 1 文書をパースできなかったときは、その文書以降を無視し、それまでに読めたタスクだけで処理を続行する。
+4. タスクパスが mount folder 自身またはその子フォルダにあるタスクだけを同期対象とする。mount folder の外にあるタスクは分類・変更しない。
+5. desired state の各タスクと同期対象の既存タスクをタスクパスで比較し、次のように分類する。
 
-| 条件 | 分類 | apply の動作 |
+| 条件 | 分類 | 同期時の動作 |
 |---|---|---|
-| 同一タスクパスの管理下タスクがない | `create` | `schtasks /Create /XML <xml> /TN <タスクパス> /F` で登録する |
-| 同一タスクパスがあり def-hash が異なる | `update` | 同上（/F で上書き） |
-| 同一タスクパスがあり def-hash が一致する | `no-change` | 何もしない |
+| desired state と同一タスクパスの既存タスクがない | `create` | `schtasks /Create /XML <xml> /TN <タスクパス> /F` で登録する |
+| 同一タスクパスがあり、正規化した XML が一致する | `no-change` | 何もしない |
+| 同一タスクパスがあり、正規化した XML が一致しない | `update` | `schtasks /Create /XML <xml> /TN <タスクパス> /F` で上書きする |
+| mount folder 配下にあり、desired state に同一タスクパスがない | `delete` | `schtasks /Delete /TN <タスクパス> /F` で削除する |
 
-生成したタスクパスと同一パスの非管理下タスク（マーカーなし）がシステムに存在する場合は、そのタスクを登録せずエラー報告して処理を続行する（非管理下タスクを上書きしない）。
+mount folder 配下の既存タスクは Description の内容にかかわらず同期対象であり、同一タスクパスのタスクを登録・更新できる。mount folder 外の同名タスクは変更しない。
 
-管理下タスクの Description から def-hash を読み取れない場合（手編集された管理タスク等）は、def-hash 不一致として扱い update する。
+6. `--dry-run` 指定時は分類までを実行し、システムを変更せず各分類を表示する。`update` と `delete` の分類行には正規化した XML の unified diff を続ける（「### --dry-run の diff 表示」）。
+7. `--dry-run` でないときは、desired state の定義順に `create`、`update`、`no-change` を処理し、その後 `delete` をタスクパスの昇順で処理する。処理の完了ごとに分類を stdout へ出力する。
 
-4. `--prune` 指定時、管理下タスクのうちタスク定義から生成したタスクパスの集合に含まれないものを `schtasks /Delete /TN <タスクパス> /F` で削除する
-5. 実行した処理をタスクごとに報告する
-
-- `--dry-run` では step 2 までを実行し、各タスクの分類（`--prune` 時は削除対象も）を表示する。`update` と `delete` の分類行には正規化した XML の unified diff を続ける（「### --dry-run の diff 表示」）。システムは変更しない。衝突エラーがある場合は非ゼロで終了する
-- schtasks の create / delete の呼び出し失敗（権限不足など）は処理を続行し、最後に失敗したタスクパスと schtasks のエラーを報告して非ゼロ終了する
-- `/Query` の失敗は分類ができないため、即時にエラー終了する
-- apply は管理者権限へ自動昇格しない
+schtasks の create / delete の呼び出し失敗（権限不足など）は処理を続行し、最後に失敗したタスクパスと schtasks のエラーを報告して非ゼロ終了する。`/Query` の失敗は分類ができないため、即時にエラー終了する。wintasks は管理者権限へ自動昇格しない。
 
 ### --dry-run の diff 表示
 
-`--dry-run` では、`update` の分類行の下に既存の管理下タスクと生成 XML の unified diff を出力し、`delete` の分類行の下に既存の管理下タスクと空文書の unified diff を出力する。diff は各分類行の直後から始まり、stdout に出力する。`create` と `no-change` には diff を出力しない。
+`--dry-run` では、`update` の分類行の下に同期対象の既存タスクと生成 XML の unified diff を出力し、`delete` の分類行の下に同期対象の既存タスクと空文書の unified diff を出力する。diff は各分類行の直後から始まり、stdout に出力する。`create` と `no-change` には diff を出力しない。
 
 比較前に XML を正規化する。正規化は XML 宣言を UTF-8 に統一し、空白だけのテキストを除去し、属性名を辞書順に並べ、要素・属性を同じインデントと改行でシリアライズする。XML の要素順と、除外対象以外の要素内容を保持する。`RegistrationInfo/Description` と `CalendarTrigger/StartBoundary` は比較から除外する。schtasks が返すそれ以外の要素は比較対象に含める。
 
-`update` の diff は既存 XML を `--- current`、生成 XML を `+++ desired` とする unified diff である。`delete` の diff は既存 XML を `--- current`、空文書を `+++ desired` とする。正規化後に差分がない `update` では、unified diff の代わりに `  (no diff)` を出力する。
+`update` の diff は既存 XML を `--- current`、生成 XML を `+++ desired` とする unified diff である。`delete` の diff は既存 XML を `--- current`、空文書を `+++ desired` とする。
 
 差分の出力例は次のとおりである。
 
@@ -291,17 +292,17 @@ update \WinTasks\cron\backup
 | 状況 | 終了コード |
 |---|---|
 | 成功（変更の有無を問わない） | 0 |
-| usage エラー（引数不足・不明コマンド・オプションの不正） | 2 |
-| ファイル読み取り失敗、YAML パースエラー、XML 生成エラー、`/Query` 失敗、衝突エラー、schtasks の失敗 | 1 |
+| usage エラー（不明な引数・オプションの不正） | 2 |
+| ファイル読み取り失敗、YAML パースエラー、mount 形式エラー、XML 生成エラー、`/Query` 失敗、schtasks の失敗 | 1 |
 
 ### エラー表示
 
-エラーは stderr に出力する（render / apply 共通）。
+エラーは stderr に出力する。
 
 即時に終了するエラーは `wintasks: <メッセージ>` の形式である。
 
 - ファイル読み取り失敗: `wintasks: <path>: <入出力エラーの内容>`
-- YAML パースエラー: 発生位置が分かるときは `wintasks: <file>:<line>:<col>: <原因>`、分からないときは `wintasks: <file>: <原因>`。name 重複は `wintasks: <file>: duplicate task name `<name>``、空または null ドキュメントは `wintasks: <file>: no task definitions found (file is empty or null)`
+- YAML パースエラー: 発生位置が分かるときは `wintasks: <file>:<line>:<col>: <原因>`、分からないときは `wintasks: <file>: <原因>`。name 重複は `wintasks: <file>: duplicate task name `<name>``、空または null ドキュメントは `wintasks: <file>: no task definitions found (file is empty or null)`、root mount は `wintasks: <file>: mount must be a non-root folder path`
 - XML 生成エラー: `wintasks: <path>: XML generation failed for task `<name>`: <原因>`
 - `/Query` の失敗: `wintasks: schtasks /Query /XML failed: <schtasks の標準エラー出力>`
 
@@ -309,7 +310,6 @@ usage エラーは `wintasks: <メッセージ>` に続けて usage を stderr �
 
 処理を続行したエラーは、すべての処理の後に 1 行ずつ出力する。
 
-- 衝突エラー: `error: <タスクパス>: a task with this name exists but is not managed by wintasks; not registered`
 - schtasks の失敗: `error: schtasks /Create /TN <タスクパス> failed: <schtasks の標準エラー出力>` または `error: schtasks /Delete /TN <タスクパス> failed: <schtasks の標準エラー出力>`
 
 処理の報告は stdout へ出力する。1 行が `<分類> <タスクパス>` の形式で、分類は `create` / `update` / `no-change` / `delete` である。`--dry-run` では分類を YAML の定義順に、その後 `delete` をタスクパスの昇順で出力する。実行時は各処理の完了ごとに出力する。
