@@ -194,7 +194,7 @@ fn parse_field(
         return Ok(Field::List(values));
     }
 
-    let (body, incr) = match text.split_once('/') {
+    let (body, incr, has_step) = match text.split_once('/') {
         Some((body, step)) => {
             let incr: u32 = step
                 .parse()
@@ -202,9 +202,9 @@ fn parse_field(
             if incr == 0 {
                 return Err(format!("invalid {name} field `{text}`: step must be >= 1"));
             }
-            (body, incr)
+            (body, incr, true)
         }
-        None => (text, 1),
+        None => (text, 1, false),
     };
 
     // Month and weekday steps have no Task Scheduler representation
@@ -223,7 +223,7 @@ fn parse_field(
     if !body.contains('-') {
         // Single value: `n` is a one-element list; `n/n` runs from n to the
         // field maximum with step n (FromCronFormat's IsIncr form).
-        if incr > 1 {
+        if has_step {
             return Ok(Field::Range {
                 start,
                 end: max,
@@ -287,8 +287,8 @@ fn parse_value_or_range(
 
 fn validate_with_cron_crate(spec: &CronSpec) -> Result<(), String> {
     let dow_field = |f: &Field| -> String {
-        // Spec 0-6 (Sunday=0) -> crate 1-7 (Sunday=1): 0 becomes 7.
-        let remap = |v: u32| if v == 0 { 7 } else { v };
+        // Spec 0-6 (Sunday=0) -> crate 1-7 (Sunday=1).
+        let remap = |v: u32| v + 1;
         match *f {
             Field::Star { incr: 1 } => "*".to_string(),
             Field::Star { incr } => format!("*/{incr}"),

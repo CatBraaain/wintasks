@@ -1,747 +1,413 @@
-//! Integration tests for `wintasks apply`.
-//!
-//! Oracle: SPEC.md — the "apply" section (steps 1-5 and its bullets),
-//! the apply rows of the exit-code table, and the apply rows of the
-//! error-display section. One `#[test]` per spec table row / bullet.
-//! render-side behavior is covered by other test files and is only
-//! verified here where the spec says apply uses the same conversion.
-
 mod common;
 
-use common::FIXED_NOW;
-use wintasks::apply::{ApplyOptions, run_apply};
+use common::{FIXED_NOW, definitions};
+use wintasks::apply::{SyncOptions, run_apply};
 use wintasks::def::parse_defs;
-use wintasks::hash::def_hash;
-use wintasks::render::render_output;
-use wintasks::schtasks::{decode, FakeSchtasks, Schtasks, SchtasksError};
-use wintasks::parse_apply;
+use wintasks::schtasks::{Schtasks, SchtasksError};
+use wintasks::xml::render_task_xml;
 
-// ---------------------------------------------------------------- helpers
+const ONE_TASK: &str = "  - name: backup\n    trigger: { type: cron, value: '0 9 * * *' }\n    action: { command: cmd.exe, args: /c backup }\n";
 
-/// `- name: Hello` (cron) — the base single-task desired state.
-const ONE_TASK: &str = "\
-- name: Hello
-  trigger: { type: cron, value: \"00 09 * * *\" }
-  action: { command: cmd.exe, args: /c echo hi }
-";
-
-/// Hello (cron) + Bye (startup), YAML order Hello first.
-const TWO_TASKS: &str = "\
-- name: Hello
-  trigger: { type: cron, value: \"00 09 * * *\" }
-  action: { command: cmd.exe, args: /c echo hi }
-- name: Bye
-  trigger: { type: startup, value: \"01:00\" }
-  action: { command: cmd.exe, args: /c echo bye }
-";
-
-/// Bye / New / Hello, deliberately not alphabetical so YAML order stays
-/// observable in report output.
-const THREE_TASKS: &str = "\
-- name: Bye
-  trigger: { type: startup, value: \"01:00\" }
-  action: { command: cmd.exe, args: /c echo bye }
-- name: New
-  trigger: { type: once, value: \"2026-02-01 09:00\" }
-  action: { command: cmd.exe, args: /c echo new }
-- name: Hello
-  trigger: { type: cron, value: \"00 09 * * *\" }
-  action: { command: cmd.exe, args: /c echo hi }
-";
-
-struct Captured {
-    code: i32,
-    out: String,
-    err: String,
+struct FakeSchtasks {
+    query_xml: String,
+    creates: Vec<String>,
+    create_xmls: Vec<String>,
+    deletes: Vec<String>,
+    fail_create: Option<String>,
+    fail_delete: Option<String>,
 }
 
-fn opts() -> ApplyOptions {
-    ApplyOptions {
-        mount: "WinTasks".to_string(),
-        dry_run: false,
-        prune: false,
+impl Schtasks for FakeSchtasks {
+    fn query(&mut self) -> Result<String, SchtasksError> {
+        Ok(self.query_xml.clone())
+    }
+
+    fn create(&mut self, path: &str, xml: &str) -> Result<(), SchtasksError> {
+        if self.fail_create.as_deref() == Some(path) {
+            return Err(SchtasksError("denied".to_string()));
+        }
+        self.creates.push(path.to_string());
+        self.create_xmls.push(xml.to_string());
+        Ok(())
+    }
+
+    fn delete(&mut self, path: &str) -> Result<(), SchtasksError> {
+        if self.fail_delete.as_deref() == Some(path) {
+            return Err(SchtasksError("denied".to_string()));
+        }
+        self.deletes.push(path.to_string());
+        Ok(())
     }
 }
 
-/// Runs apply against byte sinks with the pinned clock so output is
-/// deterministic; system effects are observed through the fake schtasks.
-fn capture(yaml: &str, opts: &ApplyOptions, sched: &mut dyn Schtasks) -> Captured {
+fn queried_task(path: &str, body: &str) -> String {
+    format!(
+        "<Task xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><URI>{}</URI></RegistrationInfo>{body}</Task>",
+        path.replace('\\', "/")
+    )
+}
+
+fn run(yaml: &str, dry_run: bool, scheduler: &mut FakeSchtasks) -> (i32, String, String) {
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = run_apply(
         yaml,
         "wintasks.yaml",
-        opts,
-        sched,
+        &SyncOptions { dry_run },
+        scheduler,
         FIXED_NOW,
         &mut out,
         &mut err,
     );
-    Captured {
+    (
         code,
-        out: String::from_utf8_lossy(&out).into_owned(),
-        err: String::from_utf8_lossy(&err).into_owned(),
-    }
-}
-
-/// The def-hash the implementation computes for one task of `yaml`.
-/// The spec pins only "same definition -> same hash", not concrete
-/// values, so the hash is derived, not hard-coded.
-fn def_hash_of(yaml: &str, name: &str) -> String {
-    let defs = parse_defs(yaml, "wintasks.yaml").expect("parse");
-    let def = defs.iter().find(|d| d.name == name).expect("task");
-    def_hash(def).expect("hash")
-}
-
-fn action_lines(output: &str) -> Vec<&str> {
-    output
-        .lines()
-        .filter(|line| {
-            matches!(
-                line.split_once(' ').map(|(action, _)| action),
-                Some("create" | "update" | "no-change" | "delete")
-            )
-        })
-        .collect()
-}
-
-/// A query-response document carrying the managed marker.
-fn managed_query_doc(path: &str) -> String {
-    query_doc(path, &format!("managed-by: wintasks; def-hash: {}", "0".repeat(64)))
-}
-
-/// A query-response document whose Description lacks the marker.
-fn unmanaged_query_doc(path: &str) -> String {
-    query_doc(path, "some unrelated description")
-}
-
-fn query_doc(path: &str, description: &str) -> String {
-    let uri = path.replace('\\', "/");
-    format!(
-        "<?xml version=\"1.0\"?><Task xmlns=\"{NS}\"><RegistrationInfo>\
-         <Description>{description}</Description><URI>{uri}</URI>\
-         </RegistrationInfo></Task>",
-        NS = wintasks::xml::TASK_XML_NS,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
     )
 }
 
-/// The XML documents embedded in render output, YAML order.
-fn rendered_xml_documents(rendered: &str) -> Vec<String> {
-    rendered
-        .split("--- ")
-        .skip(1)
-        .map(|block| {
-            block
-                .split_once('\n')
-                .expect("separator line")
-                .1
-                .trim_end()
-                .to_string()
-        })
-        .collect()
+#[test]
+fn creates_desired_tasks_and_deletes_all_omitted_tasks_in_mount() {
+    let yaml = definitions(ONE_TASK);
+    let mut scheduler = FakeSchtasks {
+        query_xml: format!(
+            "{}{}{}",
+            queried_task("\\WinTasks", ""),
+            queried_task("\\WinTasks\\other\\obsolete", ""),
+            queried_task("\\Outside\\keep", "")
+        ),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    let (code, out, err) = run(&yaml, false, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(scheduler.creates, ["\\WinTasks\\cron\\backup"]);
+    let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
+    assert_eq!(
+        scheduler.create_xmls[0],
+        render_task_xml(&definitions.tasks[0], FIXED_NOW).unwrap()
+    );
+    assert_eq!(
+        scheduler.deletes,
+        ["\\WinTasks", "\\WinTasks\\other\\obsolete"]
+    );
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        [
+            "create \\WinTasks\\cron\\backup",
+            "delete \\WinTasks",
+            "delete \\WinTasks\\other\\obsolete"
+        ]
+    );
 }
 
-/// Serves a failing `/Query` while delegating create/delete, because
-/// `FakeSchtasks::query` cannot fail.
-struct QueryFailingSchtasks {
-    inner: FakeSchtasks,
+#[test]
+fn updates_mount_task_regardless_of_description_and_dry_run_shows_diff() {
+    let yaml = definitions(ONE_TASK);
+    let mut scheduler = FakeSchtasks {
+        query_xml: queried_task(
+            "\\WinTasks\\cron\\backup",
+            "<Actions><Exec><Command>old.exe</Command></Exec></Actions>",
+        ),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    let (code, out, err) = run(&yaml, true, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
+    assert!(
+        out.starts_with("update \\WinTasks\\cron\\backup\n--- current\n+++ desired\n@@\n"),
+        "{out}"
+    );
+    assert!(out.contains("-      <Command>old.exe</Command>"), "{out}");
 }
 
-impl Schtasks for QueryFailingSchtasks {
+#[test]
+fn update_replaces_existing_mount_task() {
+    let yaml = definitions(ONE_TASK);
+    let mut scheduler = FakeSchtasks {
+        query_xml: queried_task(
+            "\\WinTasks\\cron\\backup",
+            "<Actions><Exec><Command>old.exe</Command></Exec></Actions>",
+        ),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    let (code, out, err) = run(&yaml, false, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(scheduler.creates, ["\\WinTasks\\cron\\backup"]);
+    assert_eq!(out, "update \\WinTasks\\cron\\backup\n");
+}
+
+fn mixed_sync_fixture() -> (String, FakeSchtasks) {
+    let yaml = definitions(
+        "  - name: fresh\n    trigger: { type: cron, value: '0 9 * * *' }\n    action: { command: cmd.exe, args: /c fresh }\n  - name: refresh\n    trigger: { type: cron, value: '0 9 * * *' }\n    action: { command: cmd.exe, args: /c refresh }\n",
+    );
+    let scheduler = FakeSchtasks {
+        query_xml: format!(
+            "{}{}",
+            queried_task(
+                "\\WinTasks\\cron\\refresh",
+                "<Actions><Exec><Command>old.exe</Command></Exec></Actions>"
+            ),
+            queried_task("\\WinTasks\\obsolete", "")
+        ),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    (yaml, scheduler)
+}
+
+#[test]
+fn mixed_sync_reports_definition_order_then_delete_and_orders_scheduler_calls() {
+    let (yaml, mut scheduler) = mixed_sync_fixture();
+    let (code, out, err) = run(&yaml, false, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        [
+            "create \\WinTasks\\cron\\fresh",
+            "update \\WinTasks\\cron\\refresh",
+            "delete \\WinTasks\\obsolete",
+        ],
+        "{out}"
+    );
+    assert_eq!(
+        scheduler.creates,
+        ["\\WinTasks\\cron\\fresh", "\\WinTasks\\cron\\refresh"],
+        "create calls must follow definition order"
+    );
+    assert_eq!(scheduler.deletes, ["\\WinTasks\\obsolete"]);
+}
+
+#[test]
+fn dry_run_diffs_update_and_delete_but_not_create() {
+    let (yaml, mut scheduler) = mixed_sync_fixture();
+    let (code, out, err) = run(&yaml, true, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        scheduler.creates.is_empty() && scheduler.deletes.is_empty(),
+        "dry-run must not change the system"
+    );
+    assert!(
+        out.starts_with(
+            "create \\WinTasks\\cron\\fresh\nupdate \\WinTasks\\cron\\refresh\n--- current\n+++ desired\n@@\n"
+        ),
+        "create must have no diff and update must be followed by its diff: {out}"
+    );
+    assert!(out.contains("-      <Command>old.exe</Command>"), "{out}");
+    assert!(
+        out.contains("delete \\WinTasks\\obsolete\n--- current\n+++ desired\n@@\n"),
+        "delete must be followed by its diff: {out}"
+    );
+}
+
+#[test]
+fn malformed_query_stops_at_that_document_but_keeps_prior_tasks() {
+    let yaml = definitions(
+        "  - name: wanted\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n",
+    );
+    let mut scheduler = FakeSchtasks {
+        query_xml: format!(
+            "{}<!broken>{}",
+            queried_task("\\WinTasks\\gone", ""),
+            queried_task("\\WinTasks\\ignored", "")
+        ),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    let (code, _, err) = run(&yaml, false, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(scheduler.deletes, ["\\WinTasks\\gone"]);
+}
+
+#[test]
+fn scheduler_failures_continue_and_are_reported() {
+    let yaml = definitions(
+        "  - name: one\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n  - name: two\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n",
+    );
+    let mut scheduler = FakeSchtasks {
+        query_xml: String::new(),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: Some("\\WinTasks\\now\\one".to_string()),
+        fail_delete: None,
+    };
+    let (code, out, err) = run(&yaml, false, &mut scheduler);
+    assert_eq!(code, 1);
+    assert_eq!(scheduler.creates, ["\\WinTasks\\now\\two"]);
+    assert_eq!(out, "create \\WinTasks\\now\\two\n");
+    assert_eq!(
+        err,
+        "error: schtasks /Create /TN \\WinTasks\\now\\one failed: denied\n"
+    );
+}
+
+#[test]
+fn delete_failures_are_reported_after_desired_tasks_continue() {
+    let yaml = definitions(ONE_TASK);
+    let mut scheduler = FakeSchtasks {
+        query_xml: queried_task("\\WinTasks\\obsolete", ""),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: Some("\\WinTasks\\obsolete".to_string()),
+    };
+    let (code, out, err) = run(&yaml, false, &mut scheduler);
+    assert_eq!(code, 1);
+    assert_eq!(scheduler.creates, ["\\WinTasks\\cron\\backup"]);
+    assert_eq!(out, "create \\WinTasks\\cron\\backup\n");
+    assert_eq!(
+        err,
+        "error: schtasks /Delete /TN \\WinTasks\\obsolete failed: denied\n"
+    );
+}
+
+struct QueryFailure;
+
+impl Schtasks for QueryFailure {
     fn query(&mut self) -> Result<String, SchtasksError> {
         Err(SchtasksError(
-            "schtasks /Query /XML failed: ERROR: Access is denied.".to_string(),
+            "schtasks /Query /XML failed: denied".to_string(),
         ))
     }
-    fn create(&mut self, path: &str, xml: &str) -> Result<(), SchtasksError> {
-        self.inner.create(path, xml)
+
+    fn create(&mut self, _: &str, _: &str) -> Result<(), SchtasksError> {
+        panic!("query failure must stop before create")
     }
-    fn delete(&mut self, path: &str) -> Result<(), SchtasksError> {
-        self.inner.delete(path)
+
+    fn delete(&mut self, _: &str) -> Result<(), SchtasksError> {
+        panic!("query failure must stop before delete")
     }
 }
-
-// ----------------------------------------------------------------- step 1
-// Spec: parse errors, duplicate names, and XML generation errors abort
-// before any system change.
-
-#[test]
-fn parse_error_exits_nonzero_without_system_changes() {
-    let yaml = "\
-- name: x
-  trigger: { type: cron, value: \"* * * * *\" }
-  action: { command: c }
-  extra: 1
-";
-    let mut fake = FakeSchtasks::new();
-    let cap = capture(yaml, &opts(), &mut fake);
-    assert_eq!(cap.code, 1);
-    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
-    // Spec: `wintasks: <file>:<line>:<col>: <reason>` when the location
-    // is known; serde_yaml_ng reports one for this input.
-    let first = cap.err.lines().next().unwrap_or_default();
-    let location = first
-        .strip_prefix("wintasks: wintasks.yaml:")
-        .unwrap_or_default();
-    let shape_ok = location.split_once(": ").is_some_and(|(loc, _)| {
-        loc.split(':')
-            .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-    });
-    assert!(shape_ok, "expected file:line:col format, got: {first}");
-}
-
-#[test]
-fn duplicate_task_name_exits_nonzero_without_system_changes() {
-    let yaml = "\
-- name: dup
-  trigger: { type: now, value: v }
-  action: { command: c }
-- name: dup
-  trigger: { type: now, value: v }
-  action: { command: c }
-";
-    let mut fake = FakeSchtasks::new();
-    let cap = capture(yaml, &opts(), &mut fake);
-    assert_eq!(cap.code, 1);
-    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
-    // Spec: `wintasks: <file>: duplicate task name `<name>``.
-    assert_eq!(
-        cap.err,
-        "wintasks: wintasks.yaml: duplicate task name `dup`\n"
-    );
-}
-
-#[test]
-fn xml_generation_error_exits_nonzero_without_system_changes() {
-    let yaml = "\
-- name: Bad
-  trigger: { type: cron, value: \"not cron\" }
-  action: { command: c }
-";
-    let mut fake = FakeSchtasks::new();
-    let cap = capture(yaml, &opts(), &mut fake);
-    assert_eq!(cap.code, 1);
-    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
-    // Spec: `wintasks: <path>: XML generation failed for task `<name>`: <reason>`.
-    assert!(
-        cap.err
-            .starts_with("wintasks: wintasks.yaml: XML generation failed for task `Bad`: "),
-        "{}",
-        cap.err
-    );
-}
-
-// ----------------------------------------------------------------- step 2
-// Spec: managed tasks are those whose Description starts with the
-// marker, matched regardless of folder; an unparsable query document
-// stops reading there and apply continues with the tasks read so far.
-
-#[test]
-fn marker_matching_ignores_folders() {
-    // A managed task under a folder outside --mount is still matched and
-    // becomes a prune target.
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\Other\\cron\\Gone".to_string(), Some("0".repeat(64)));
-    let mut o = opts();
-    o.prune = true;
-    let cap = capture(ONE_TASK, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert_eq!(fake.delete_calls, vec!["\\Other\\cron\\Gone"]);
-}
-
-#[test]
-fn query_output_with_utf16_le_bom_is_decoded() {
-    // Spec: /Query output with a UTF-16 LE BOM is decoded as UTF-16.
-    let text = "タスク";
-    let mut bytes = vec![0xFF, 0xFE];
-    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
-    assert_eq!(decode(&bytes), text);
-}
-
-#[test]
-fn query_output_with_utf16_be_bom_is_decoded() {
-    // Spec: /Query output with a UTF-16 BE BOM is decoded as UTF-16.
-    let text = "abc";
-    let mut bytes = vec![0xFE, 0xFF];
-    bytes.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
-    assert_eq!(decode(&bytes), text);
-}
-
-#[test]
-fn query_output_without_bom_is_read_as_utf8() {
-    // Spec: /Query output without a BOM is read as UTF-8.
-    assert_eq!(decode("abc".as_bytes()), "abc");
-}
-
-#[test]
-fn unparsable_query_document_ignores_rest_and_continues() {
-    // Alpha parses, the next document is malformed, Beta comes after it:
-    // Beta is ignored and apply still finishes with the partial result.
-    let mut fake = FakeSchtasks::new();
-    fake.extra_query_xml = format!(
-        "{}{}{}",
-        managed_query_doc("\\WinTasks\\cron\\Alpha"),
-        "<!BROKEN>",
-        managed_query_doc("\\WinTasks\\cron\\Beta"),
-    );
-    let mut o = opts();
-    o.prune = true;
-    let cap = capture(ONE_TASK, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert_eq!(fake.delete_calls, vec!["\\WinTasks\\cron\\Alpha"]);
-}
-
-// ----------------------------------------------------------------- step 3
-// Spec classification table: create / update / no-change, unmanaged
-// same-name collisions skipped, unreadable def-hash treated as update.
-
-#[test]
-fn create_when_no_managed_same_name_task() {
-    // Spec: no same-name managed task -> `create`.
-    let mut fake = FakeSchtasks::new();
-    let cap = capture(ONE_TASK, &opts(), &mut fake);
-    assert_eq!(cap.code, 0);
-    assert_eq!(fake.create_calls, vec!["\\WinTasks\\cron\\Hello"]);
-}
-
-#[test]
-fn update_when_def_hash_differs() {
-    // Spec: same name with a different def-hash -> `update` (overwrite
-    // via /F, i.e. a create call).
-    let mut fake = FakeSchtasks::new();
-    fake.tasks.insert(
-        "\\WinTasks\\cron\\Hello".to_string(),
-        Some("0".repeat(64)),
-    );
-    let cap = capture(ONE_TASK, &opts(), &mut fake);
-    assert_eq!(cap.code, 0);
-    assert_eq!(fake.create_calls, vec!["\\WinTasks\\cron\\Hello"]);
-}
-
-#[test]
-fn no_change_when_def_hash_matches() {
-    // Spec: same name with the same def-hash -> `no-change`, nothing is
-    // executed. The marker-carrying query task is what makes it managed.
-    let same = def_hash_of(ONE_TASK, "Hello");
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Hello".to_string(), Some(same));
-    let cap = capture(ONE_TASK, &opts(), &mut fake);
-    assert_eq!(cap.code, 0);
-    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
-}
-
-#[test]
-fn passes_same_xml_as_render_to_schtasks_create() {
-    // Spec: "render and apply use the same conversion" — the XML handed
-    // to schtasks /Create must equal render's output at the same clock.
-    let mut fake = FakeSchtasks::new();
-    let cap = capture(TWO_TASKS, &opts(), &mut fake);
-    assert_eq!(cap.code, 0);
-    let defs = parse_defs(TWO_TASKS, "wintasks.yaml").expect("parse");
-    let rendered = render_output(&defs, FIXED_NOW).expect("render");
-    assert_eq!(fake.create_xmls, rendered_xml_documents(&rendered));
-}
-
-#[test]
-fn unmanaged_same_name_not_registered_but_continues() {
-    // Spec: a same-name task without the marker is not managed; it is
-    // not registered, reported as an error, and the rest continues.
-    let mut fake = FakeSchtasks::new();
-    fake.extra_query_xml = unmanaged_query_doc("\\WinTasks\\cron\\Hello");
-    let cap = capture(TWO_TASKS, &opts(), &mut fake);
-    assert_eq!(cap.code, 1);
-    assert_eq!(fake.create_calls, vec!["\\WinTasks\\startup\\Bye"]);
-    // Spec: `error: <task name>: a task with this name exists but is
-    // not managed by wintasks; not registered`.
-    assert_eq!(
-        cap.err,
-        "error: \\WinTasks\\cron\\Hello: a task with this name exists but is not managed by wintasks; not registered\n"
-    );
-}
-
-#[test]
-fn unreadable_def_hash_treated_as_update() {
-    // Spec: when the def-hash cannot be read from the Description, the
-    // task is treated as a mismatch and updated.
-    let mut fake = FakeSchtasks::new();
-    fake.tasks.insert("\\WinTasks\\cron\\Hello".to_string(), None);
-    let cap = capture(ONE_TASK, &opts(), &mut fake);
-    assert_eq!(cap.code, 0);
-    assert_eq!(fake.create_calls, vec!["\\WinTasks\\cron\\Hello"]);
-}
-
-#[test]
-fn def_hash_does_not_include_mount() {
-    // Spec: the def-hash excludes name and mount. The same definition
-    // under a different mount must produce the identical XML (and
-    // therefore the identical Description hash).
-    let mut first = FakeSchtasks::new();
-    capture(ONE_TASK, &opts(), &mut first);
-    let mut second = FakeSchtasks::new();
-    let other_mount = ApplyOptions {
-        mount: "Other".to_string(),
-        ..opts()
-    };
-    capture(ONE_TASK, &other_mount, &mut second);
-
-    assert_eq!(first.create_xmls.len(), 1);
-    assert_eq!(first.create_xmls, second.create_xmls);
-    assert_ne!(first.create_calls, second.create_calls);
-}
-
-// ----------------------------------------------------------------- step 4
-// Spec: --prune deletes managed tasks missing from the definitions;
-// unmanaged tasks are never targets.
-
-#[test]
-fn prune_deletes_managed_tasks_missing_from_definitions() {
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Gone".to_string(), Some("0".repeat(64)));
-    let mut o = opts();
-    o.prune = true;
-    let cap = capture(ONE_TASK, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert_eq!(fake.delete_calls, vec!["\\WinTasks\\cron\\Gone"]);
-}
-
-#[test]
-fn prune_does_not_delete_unmanaged_tasks() {
-    let mut fake = FakeSchtasks::new();
-    fake.extra_query_xml = unmanaged_query_doc("\\Other\\Important");
-    let mut o = opts();
-    o.prune = true;
-    let cap = capture(ONE_TASK, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert!(fake.delete_calls.is_empty());
-}
-
-// ----------------------------------------------------------------- step 5
-// Spec: reports go to stdout as `<classification> <task name>`, one
-// line per completed action.
-
-#[test]
-fn reports_each_completed_action_in_execution_order() {
-    // Bye -> update, New -> create, Hello -> no-change, Gone -> delete:
-    // reports appear in YAML order as each completes, deletes last.
-    let same = def_hash_of(THREE_TASKS, "Hello");
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\startup\\Bye".to_string(), Some("0".repeat(64)));
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Hello".to_string(), Some(same));
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Gone".to_string(), Some("0".repeat(64)));
-    let mut o = opts();
-    o.prune = true;
-    let cap = capture(THREE_TASKS, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    let reported: Vec<&str> = cap.out.lines().collect();
-    assert_eq!(
-        reported,
-        vec![
-            "update \\WinTasks\\startup\\Bye",
-            "create \\WinTasks\\once\\New",
-            "no-change \\WinTasks\\cron\\Hello",
-            "delete \\WinTasks\\cron\\Gone",
-        ],
-        "{reported:?}"
-    );
-}
-
-// ---------------------------------------------------------------- dry-run
-// Spec: --dry-run stops after step 2, shows classifications in YAML
-// order and deletes in task-name order, changes nothing, and exits
-// nonzero on collision errors.
-
-#[test]
-fn dry_run_shows_plan_in_yaml_order_then_deletes_in_name_order() {
-    let same = def_hash_of(THREE_TASKS, "Hello");
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\startup\\Bye".to_string(), Some("0".repeat(64)));
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Hello".to_string(), Some(same));
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Gone".to_string(), Some("0".repeat(64)));
-    fake.tasks
-        .insert("\\WinTasks\\boot\\Alpha".to_string(), Some("0".repeat(64)));
-    let mut o = opts();
-    o.dry_run = true;
-    o.prune = true;
-    let cap = capture(THREE_TASKS, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    let planned = action_lines(&cap.out);
-    assert_eq!(
-        planned,
-        vec![
-            "update \\WinTasks\\startup\\Bye",
-            "create \\WinTasks\\once\\New",
-            "no-change \\WinTasks\\cron\\Hello",
-            "delete \\WinTasks\\boot\\Alpha",
-            "delete \\WinTasks\\cron\\Gone",
-        ],
-        "{planned:?}"
-    );
-
-    let lines: Vec<&str> = cap.out.lines().collect();
-    let line_index = |expected: &str| {
-        lines
-            .iter()
-            .position(|line| *line == expected)
-            .unwrap_or_else(|| panic!("missing {expected}: {}", cap.out))
-    };
-    let update_index = line_index("update \\WinTasks\\startup\\Bye");
-    let create_index = line_index("create \\WinTasks\\once\\New");
-    let no_change_index = line_index("no-change \\WinTasks\\cron\\Hello");
-    let alpha_delete_index = line_index("delete \\WinTasks\\boot\\Alpha");
-    let gone_delete_index = line_index("delete \\WinTasks\\cron\\Gone");
-    assert_eq!(lines[update_index + 1], "--- current");
-    assert_eq!(lines[update_index + 2], "+++ desired");
-    assert_eq!(lines[create_index + 1], "no-change \\WinTasks\\cron\\Hello");
-    assert_eq!(lines[no_change_index + 1], "delete \\WinTasks\\boot\\Alpha");
-    assert_eq!(lines[alpha_delete_index + 1], "--- current");
-    assert_eq!(lines[gone_delete_index + 1], "--- current");
-}
-
-#[test]
-fn dry_run_changes_nothing() {
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Gone".to_string(), Some("0".repeat(64)));
-    let mut o = opts();
-    o.dry_run = true;
-    o.prune = true;
-    let cap = capture(ONE_TASK, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
-}
-
-#[test]
-fn dry_run_create_and_no_change_have_no_diff() {
-    let same = def_hash_of(ONE_TASK, "Hello");
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Hello".to_string(), Some(same));
-    let mut o = opts();
-    o.dry_run = true;
-    let cap = capture(TWO_TASKS, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert_eq!(
-        cap.out,
-        "no-change \\WinTasks\\cron\\Hello\ncreate \\WinTasks\\startup\\Bye\n"
-    );
-}
-
-#[test]
-fn dry_run_update_includes_normalized_xml_diff() {
-    let path = "\\WinTasks\\cron\\Hello";
-    let mut fake = FakeSchtasks::new();
-    fake.extra_query_xml = format!(
-        "<Task xmlns=\"{NS}\" version=\"1.2\"><RegistrationInfo><Description>managed-by: wintasks; def-hash: {hash}</Description><URI>/WinTasks/cron/Hello</URI></RegistrationInfo><Actions><Exec><Command>cmd.exe</Command><Arguments>/c echo old</Arguments></Exec></Actions></Task>",
-        NS = wintasks::xml::TASK_XML_NS,
-        hash = "0".repeat(64),
-    );
-    let mut o = opts();
-    o.dry_run = true;
-    let cap = capture(ONE_TASK, &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert!(
-        cap.out
-            .starts_with(&format!("update {path}\n--- current\n+++ desired\n@@\n"))
-    );
-    assert!(
-        cap.out
-            .contains("-      <Arguments>/c echo old</Arguments>")
-    );
-    assert!(cap.out.contains("+      <Arguments>/c echo hi</Arguments>"));
-    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
-}
-
-#[test]
-fn dry_run_delete_includes_diff_against_empty_document() {
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Gone".to_string(), Some("0".repeat(64)));
-    let mut o = opts();
-    o.dry_run = true;
-    o.prune = true;
-    let cap = capture("[]\n", &o, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert!(
-        cap.out
-            .starts_with("delete \\WinTasks\\cron\\Gone\n--- current\n+++ desired\n@@\n")
-    );
-    assert!(cap.out.contains("-<Task"));
-    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
-}
-
-#[test]
-fn dry_run_with_conflict_exits_nonzero() {
-    let mut fake = FakeSchtasks::new();
-    fake.extra_query_xml = unmanaged_query_doc("\\WinTasks\\cron\\Hello");
-    let mut o = opts();
-    o.dry_run = true;
-    let cap = capture(ONE_TASK, &o, &mut fake);
-    assert_eq!(cap.code, 1);
-    assert!(fake.create_calls.is_empty() && fake.delete_calls.is_empty());
-}
-
-// -------------------------------------------------- schtasks call failures
-// Spec: create/delete failures continue processing, report the failed
-// task name and schtasks error at the end, and exit nonzero.
-
-#[test]
-fn create_failure_continues_then_reports_and_exits_nonzero() {
-    let mut fake = FakeSchtasks::new();
-    fake.fail_create_paths = vec!["\\WinTasks\\cron\\Hello".to_string()];
-    let cap = capture(TWO_TASKS, &opts(), &mut fake);
-    assert_eq!(cap.code, 1);
-    // The remaining task still ran.
-    assert_eq!(fake.create_calls, vec!["\\WinTasks\\startup\\Bye"]);
-    // Spec: `error: schtasks /Create /TN <task name> failed: <schtasks stderr>`.
-    assert_eq!(
-        cap.err,
-        "error: schtasks /Create /TN \\WinTasks\\cron\\Hello failed: ERROR ACCESS DENIED\n"
-    );
-}
-
-#[test]
-fn delete_failure_continues_then_reports_and_exits_nonzero() {
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Gone".to_string(), Some("0".repeat(64)));
-    fake.fail_delete_paths = vec!["\\WinTasks\\cron\\Gone".to_string()];
-    let mut o = opts();
-    o.prune = true;
-    let cap = capture(ONE_TASK, &o, &mut fake);
-    assert_eq!(cap.code, 1);
-    // The definitions still applied before the failing delete.
-    assert_eq!(fake.create_calls, vec!["\\WinTasks\\cron\\Hello"]);
-    // Spec: `error: schtasks /Delete /TN <task name> failed: <schtasks stderr>`.
-    assert_eq!(
-        cap.err,
-        "error: schtasks /Delete /TN \\WinTasks\\cron\\Gone failed: ERROR ACCESS DENIED\n"
-    );
-}
-
-// ------------------------------------------------------------ /Query failure
-// Spec: a /Query failure cannot be classified around, so apply exits
-// immediately.
 
 #[test]
 fn query_failure_exits_immediately() {
-    let mut sched = QueryFailingSchtasks {
-        inner: FakeSchtasks::new(),
-    };
-    let cap = capture(ONE_TASK, &opts(), &mut sched);
-    assert_eq!(cap.code, 1);
-    assert!(
-        sched.inner.create_calls.is_empty() && sched.inner.delete_calls.is_empty(),
-        "no system change after /Query failure"
+    let yaml = definitions(ONE_TASK);
+    let mut scheduler = QueryFailure;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run_apply(
+        &yaml,
+        "wintasks.yaml",
+        &SyncOptions { dry_run: false },
+        &mut scheduler,
+        FIXED_NOW,
+        &mut out,
+        &mut err,
     );
-    // Spec: `wintasks: schtasks /Query /XML failed: <schtasks stderr>`.
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
     assert_eq!(
-        cap.err,
-        "wintasks: schtasks /Query /XML failed: ERROR: Access is denied.\n"
+        String::from_utf8(err).unwrap(),
+        "wintasks: schtasks /Query /XML failed: denied\n"
     );
 }
 
-// ------------------------------------------------------------ exit codes
-// Spec exit-code table: success 0 regardless of changes; usage errors 2.
+struct PreflightFailure;
 
-fn run_cli(args: &[&str]) -> (u8, String, String) {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+impl Schtasks for PreflightFailure {
+    fn query(&mut self) -> Result<String, SchtasksError> {
+        panic!("preflight failures must stop before schtasks /Query")
+    }
+
+    fn create(&mut self, _: &str, _: &str) -> Result<(), SchtasksError> {
+        panic!("preflight failures must stop before schtasks /Create")
+    }
+
+    fn delete(&mut self, _: &str) -> Result<(), SchtasksError> {
+        panic!("preflight failures must stop before schtasks /Delete")
+    }
+}
+
+fn run_preflight(yaml: &str) -> (i32, String, String) {
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let code = wintasks::run(&args, &mut out, &mut err);
+    let code = run_apply(
+        yaml,
+        "wintasks.yaml",
+        &SyncOptions { dry_run: false },
+        &mut PreflightFailure,
+        FIXED_NOW,
+        &mut out,
+        &mut err,
+    );
     (
         code,
-        String::from_utf8_lossy(&out).into_owned(),
-        String::from_utf8_lossy(&err).into_owned(),
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
     )
 }
 
 #[test]
-fn success_exits_zero_regardless_of_changes() {
-    // With changes: everything is created.
-    let mut fake = FakeSchtasks::new();
-    let cap = capture(TWO_TASKS, &opts(), &mut fake);
-    assert_eq!(cap.code, 0, "with changes");
-    assert_eq!(fake.create_calls.len(), 2);
-
-    // Without changes: the same hash means nothing to do.
-    let same = def_hash_of(ONE_TASK, "Hello");
-    let mut fake = FakeSchtasks::new();
-    fake.tasks
-        .insert("\\WinTasks\\cron\\Hello".to_string(), Some(same));
-    let cap = capture(ONE_TASK, &opts(), &mut fake);
-    assert_eq!(cap.code, 0, "without changes");
-}
-
-#[test]
-fn default_options_match_spec_values() {
-    // Spec defaults: --path wintasks.yaml, --mount WinTasks,
-    // --dry-run off, --prune off.
-    let cli = parse_apply(&[]).expect("parse apply");
-    assert_eq!(cli.path, "wintasks.yaml");
-    assert_eq!(cli.opts.mount, "WinTasks");
-    assert!(!cli.opts.dry_run);
-    assert!(!cli.opts.prune);
-}
-
-#[test]
-fn custom_mount_is_used_for_task_names() {
-    // Spec: the task path is `<mount>\\<first trigger type>\\<name>`;
-    // --mount replaces the WinTasks default.
-    let mut fake = FakeSchtasks::new();
-    let custom = ApplyOptions {
-        mount: "Custom".to_string(),
-        ..opts()
-    };
-    let cap = capture(ONE_TASK, &custom, &mut fake);
-    assert_eq!(cap.code, 0);
-    assert_eq!(fake.create_calls, vec!["\\Custom\\cron\\Hello"]);
-}
-
-#[test]
-fn apply_only_option_on_render_exits_two_with_usage() {
-    // Spec: --prune applies to apply only; misuse is a usage error.
-    let (code, out, err) = run_cli(&["render", "--prune"]);
-    assert_eq!(code, 2);
-    assert!(out.is_empty());
-    assert!(err.starts_with("wintasks: "), "{err}");
-    assert!(err.contains("usage: wintasks"), "{err}");
-}
-
-#[test]
-fn invalid_apply_argument_exits_two_with_usage() {
-    // Spec: malformed options (here --mount without a value) exit 2.
-    let (code, out, err) = run_cli(&["apply", "--mount"]);
-    assert_eq!(code, 2);
-    assert!(out.is_empty());
-    assert!(err.starts_with("wintasks: "), "{err}");
-    assert!(err.contains("usage: wintasks"), "{err}");
-}
-
-// ---------------------------------------------------------- error display
-// Spec: file read failure reports the path and io error, exit 1.
-
-#[test]
-fn yaml_file_read_failure_reports_path_and_exits_one() {
-    // Read failure lives above run_apply (the CLI reads the file), so
-    // this case runs through the real CLI entry point.
-    let path = common::write_temp_yaml("apply-read-failure", ONE_TASK);
-    std::fs::remove_file(&path).expect("remove temp YAML");
-    let (code, out, err) = run_cli(&["apply", "--path", &path]);
+fn yaml_parse_failure_exits_one_before_query() {
+    let (code, out, err) = run_preflight("mount: WinTasks\ntasks: [\n");
     assert_eq!(code, 1);
     assert!(out.is_empty());
-    // Spec: `wintasks: <path>: <io error content>`.
     assert!(
-        err.starts_with(&format!("wintasks: {path}: ")),
-        "{}",
-        err
+        err.starts_with("wintasks: wintasks.yaml:3:1: "),
+        "located parse errors must use `wintasks: <file>:<line>:<col>: `: {err}"
     );
+}
+
+#[test]
+fn xml_generation_failure_exits_one_before_query() {
+    let yaml = definitions(
+        "  - name: backup\n    trigger: { type: cron, value: 'bad cron' }\n    action: { command: cmd.exe }\n",
+    );
+    let (code, out, err) = run_preflight(&yaml);
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert_eq!(
+        err,
+        "wintasks: wintasks.yaml: XML generation failed for task `backup`: invalid cron expression `bad cron`: expected 5 fields (minute hour day month weekday), got 2\n"
+    );
+}
+
+#[test]
+fn dry_run_delete_prints_diff() {
+    let yaml = definitions(
+        "  - name: backup\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n",
+    );
+    let mut scheduler = FakeSchtasks {
+        query_xml: queried_task("\\WinTasks\\obsolete", "<Actions/>"),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    let (code, out, err) = run(&yaml, true, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("delete \\WinTasks\\obsolete\n--- current\n+++ desired\n@@\n"));
+    assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
+}
+
+#[test]
+fn decodes_utf16_and_utf8_query_output() {
+    let text = "task";
+    let mut little_endian = vec![0xFF, 0xFE];
+    little_endian.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let mut big_endian = vec![0xFE, 0xFF];
+    big_endian.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+    assert_eq!(wintasks::schtasks::decode(&little_endian), text);
+    assert_eq!(wintasks::schtasks::decode(&big_endian), text);
+    assert_eq!(wintasks::schtasks::decode(text.as_bytes()), text);
 }

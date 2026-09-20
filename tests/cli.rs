@@ -1,162 +1,96 @@
-//! Integration tests for the `wintasks render` CLI surface.
-//!
-//! Oracle: SPEC.md — the command overview (`render` is a pure
-//! YAML-to-XML converter that changes nothing), the common-options
-//! table (render rows), the "invalid arguments print usage and exit
-//! nonzero" sentence, and the render rows of the exit-code and
-//! error-display sections. One `#[test]` per spec table row / bullet.
-//! apply-side behavior is covered by tests/apply.rs; apply-only
-//! options appear here only as arguments `render` must reject.
+use wintasks::{USAGE, parse_cli};
 
-mod common;
-
-use common::{run_render, write_temp_yaml};
-
-/// `- name: Hello` (now trigger) — the minimal desired state.
-const ONE_TASK: &str = "\
-- name: Hello
-  trigger: { type: now, value: v }
-  action: { command: cmd.exe }
-";
-
-/// Runs the CLI with byte sinks and returns (exit code, stdout, stderr).
-fn run_cli(args: &[&str]) -> (u8, String, String) {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let code = wintasks::run(&args, &mut out, &mut err);
-    (
-        code,
-        String::from_utf8_lossy(&out).into_owned(),
-        String::from_utf8_lossy(&err).into_owned(),
-    )
-}
-
-// ------------------------------------------------------ command overview
-// Spec: `render` converts YAML to XML on stdout and changes nothing.
-
-#[test]
-fn render_writes_xml_to_stdout_and_leaves_input_unchanged() {
-    let path = write_temp_yaml("cli-purity", ONE_TASK);
-    let before = std::fs::read_to_string(&path).unwrap();
-    let (code, out, err) = run_render(&path);
-    assert_eq!(code, 0);
-    assert!(out.starts_with("--- Hello ---\n"), "{out}");
-    assert!(out.contains("<?xml"), "{out}");
-    assert!(err.is_empty(), "{err}");
-    // A pure converter must not rewrite its input.
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-}
-
-// -------------------------------------------------------- common options
-// Spec common-options table, render rows of --path.
-
-#[test]
-fn path_defaults_to_wintasks_yaml() {
-    // Runs the real binary in a temp cwd so the default is observable.
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::fs::write(dir.path().join("wintasks.yaml"), ONE_TASK).expect("write yaml");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
-        .current_dir(dir.path())
-        .args(["render"])
-        .output()
-        .expect("run wintasks binary");
-    assert!(output.status.success());
-    let out = String::from_utf8_lossy(&output.stdout);
-    assert!(out.contains("--- Hello ---"), "{out}");
+fn args(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
 }
 
 #[test]
-fn duplicate_path_option_last_value_wins() {
-    // Spec: duplicate --path uses the last value; the first (missing)
-    // path must not fail the run.
-    let missing = "/nonexistent/wintasks-first.yaml";
-    let path = write_temp_yaml("cli-dup-path", ONE_TASK);
-    let (code, out, _) = run_cli(&["render", "--path", missing, "--path", &path]);
-    assert_eq!(code, 0);
-    assert!(out.contains("--- Hello ---"), "{out}");
-}
-
-#[test]
-fn directory_path_is_read_error_without_usage() {
-    // Spec: --path cannot be a directory; that is a read failure
-    // (exit 1), not an invalid-argument usage error.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let (code, out, err) = run_render(dir.path().to_str().unwrap());
-    assert_eq!(code, 1);
-    assert!(out.is_empty());
-    assert!(err.starts_with("wintasks: "), "{err}");
-    assert!(!err.contains("usage"), "{err}");
-}
-
-// ----------------------------------------------------- invalid arguments
-// Spec: invalid arguments print usage and exit 2 (exit-code table).
-
-#[test]
-fn no_arguments_prints_usage_and_exits_two() {
-    let (code, out, err) = run_cli(&[]);
-    assert_eq!(code, 2);
-    assert!(out.is_empty());
-    assert!(err.contains("usage: wintasks"), "{err}");
-}
-
-#[test]
-fn unknown_command_prints_usage_and_exits_two() {
-    let (code, out, err) = run_cli(&["bogus"]);
-    assert_eq!(code, 2);
-    assert!(out.is_empty());
-    assert!(err.contains("usage: wintasks"), "{err}");
-}
-
-#[test]
-fn option_without_value_prints_usage_and_exits_two() {
-    let (code, out, err) = run_cli(&["render", "--path"]);
-    assert_eq!(code, 2);
-    assert!(out.is_empty());
-    assert!(err.contains("usage: wintasks"), "{err}");
-}
-
-// ------------------------------------------------- apply-only options
-// Spec common-options table: --mount / --dry-run / --prune apply to
-// apply only; on render they are invalid arguments (usage, exit 2).
-
-#[test]
-fn render_rejects_mount() {
-    let (code, out, err) = run_cli(&["render", "--mount", "M"]);
-    assert_eq!(code, 2);
-    assert!(out.is_empty());
-    assert!(err.contains("usage: wintasks"), "{err}");
-}
-
-#[test]
-fn render_rejects_dry_run() {
-    let (code, out, err) = run_cli(&["render", "--dry-run"]);
-    assert_eq!(code, 2);
-    assert!(out.is_empty());
-    assert!(err.contains("usage: wintasks"), "{err}");
-}
-
-#[test]
-fn render_rejects_prune() {
-    let (code, out, err) = run_cli(&["render", "--prune"]);
-    assert_eq!(code, 2);
-    assert!(out.is_empty());
-    assert!(err.contains("usage: wintasks"), "{err}");
-}
-
-// -------------------------------------------------------- read failure
-// Spec exit-code / error-display: file read failure is exit 1 with
-// `wintasks: <path>: <io error content>` and no usage.
-
-#[test]
-fn missing_file_reports_read_error_and_exits_one() {
-    let missing = "/nonexistent/wintasks-missing.yaml";
-    let (code, out, err) = run_render(missing);
-    assert_eq!(code, 1);
-    assert!(out.is_empty());
-    assert!(
-        err.starts_with(&format!("wintasks: {missing}: ")),
-        "{err}"
+fn no_subcommand_is_the_default_sync_invocation() {
+    assert_eq!(
+        parse_cli(&[]).unwrap(),
+        wintasks::CliOptions {
+            dry_run: false,
+            render: false,
+        }
     );
-    assert!(!err.contains("usage"), "{err}");
+}
+
+#[test]
+fn dry_run_and_render_are_the_only_options() {
+    assert!(parse_cli(&args(&["--dry-run"])).unwrap().dry_run);
+    assert!(parse_cli(&args(&["--render"])).unwrap().render);
+    for invalid in [
+        ["--dry-run", "--render"].as_slice(),
+        ["apply"].as_slice(),
+        ["render"].as_slice(),
+        ["--path", "input.yaml"].as_slice(),
+        ["--mount", "Other"].as_slice(),
+        ["--prune"].as_slice(),
+    ] {
+        assert!(parse_cli(&args(invalid)).is_err(), "{invalid:?}");
+    }
+}
+
+#[test]
+fn usage_errors_write_prefix_usage_and_exit_two() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = wintasks::run(&args(&["--unknown"]), &mut stdout, &mut stderr);
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        format!("wintasks: unexpected argument `--unknown`\n{USAGE}\n")
+    );
+}
+
+#[test]
+fn render_cli_uses_fixed_file_and_writes_ordered_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("wintasks.yaml"),
+        "mount: WinTasks\ntasks:\n  - name: first\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n  - name: second\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
+        .current_dir(directory.path())
+        .arg("--render")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("--- first ---\n<?xml"));
+    assert!(stdout.contains("</Task>\n--- second ---\n<?xml"));
+    assert!(!stdout.contains("\n\n"));
+}
+
+#[test]
+fn render_cli_outputs_nothing_for_empty_desired_state() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("wintasks.yaml"),
+        "mount: WinTasks\ntasks: []\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
+        .current_dir(directory.path())
+        .arg("--render")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn missing_definitions_file_exits_one_with_error_and_no_usage() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("wintasks: wintasks.yaml: "), "{stderr}");
+    assert!(!stderr.contains("usage"), "{stderr}");
 }
