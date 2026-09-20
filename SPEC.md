@@ -4,7 +4,7 @@ cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタ
 
 タスクの管理対象は Description ではなく mount folder で決まる。指定した mount folder 配下のタスクは、Description の内容にかかわらずこの CLI が管理する。mount folder の外にあるタスクは変更しない。
 
-コマンドの既定動作はサブコマンドなしの `wintasks` であり、YAML とシステムを同期する。`wintasks --dry-run` はシステムを変更せず差分を表示し、`wintasks --render` は XML を生成して stdout へ出力する。`--dry-run` と `--render` は同時に指定できない。
+コマンドの既定動作はサブコマンドなしの `wintasks` であり、YAML とシステムを同期する。`wintasks --dry-run` はシステムを変更せず差分を表示し、`wintasks --render` は XML を生成して stdout へ出力する。`--dry-run` と `--render` は同時に指定できない。`--help` と `-h` は同じヘルプ表示として扱い、他のオプションと同時に指定した場合もヘルプを優先する。
 
 オプション:
 
@@ -13,6 +13,22 @@ cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタ
 | なし | — | YAML と mount folder を同期する |
 | `--dry-run` | なし | システムを変更せず変更計画と差分を表示する |
 | `--render` | なし | YAML の各タスクを XML に変換して表示する。システムを変更しない |
+| `-h`, `--help` | なし | ヘルプを stdout に表示して終了する。定義ファイルを読み込まず、システムを変更しない |
+
+`wintasks --help` または `wintasks -h` は終了コード 0 で、次の文字列を stdout に出力する。出力の各行と末尾の改行を含めて正本とする。
+
+```text
+wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml
+
+Usage: wintasks [OPTIONS]
+
+Options:
+  --dry-run    Show planned changes without modifying the system
+  --render     Render task XML without querying or modifying the system
+  -h, --help   Show this help message
+```
+
+`--help` または `-h` は `--dry-run` または `--render` と同時に指定でき、ヘルプだけを出力する。認識できない引数を含む場合は、ヘルプオプションがあっても usage エラーとなる。`--dry-run` と `--render` の組み合わせは、ヘルプオプションがない場合に usage エラーとなる。
 
 定義ファイルは `wintasks.yaml` 固定である。引数が不正な場合は usage を表示して非ゼロ終了する。
 

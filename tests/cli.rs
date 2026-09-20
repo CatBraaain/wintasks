@@ -1,5 +1,7 @@
 use wintasks::{USAGE, parse_cli};
 
+const EXPECTED_HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks [OPTIONS]\n\nOptions:\n  --dry-run    Show planned changes without modifying the system\n  --render     Render task XML without querying or modifying the system\n  -h, --help   Show this help message\n";
+
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
@@ -11,14 +13,20 @@ fn no_subcommand_is_the_default_sync_invocation() {
         wintasks::CliOptions {
             dry_run: false,
             render: false,
+            help: false,
         }
     );
 }
 
 #[test]
-fn dry_run_and_render_are_the_only_options() {
+fn cli_options_are_parsed_and_conflicts_are_rejected() {
     assert!(parse_cli(&args(&["--dry-run"])).unwrap().dry_run);
     assert!(parse_cli(&args(&["--render"])).unwrap().render);
+    assert!(parse_cli(&args(&["--help"])).unwrap().help);
+    assert!(parse_cli(&args(&["-h"])).unwrap().help);
+    assert!(parse_cli(&args(&["-h", "--dry-run", "--render"]))
+        .unwrap()
+        .help);
     for invalid in [
         ["--dry-run", "--render"].as_slice(),
         ["apply"].as_slice(),
@@ -41,6 +49,61 @@ fn usage_errors_write_prefix_usage_and_exit_two() {
     assert_eq!(
         String::from_utf8(stderr).unwrap(),
         format!("wintasks: unexpected argument `--unknown`\n{USAGE}\n")
+    );
+}
+
+#[test]
+fn help_does_not_hide_unknown_argument_errors() {
+    for values in [&["--help", "--unknown"][..], &["-h", "--unknown"][..]] {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = wintasks::run(&args(values), &mut stdout, &mut stderr);
+        assert_eq!(code, 2, "args: {values:?}");
+        assert!(stdout.is_empty(), "args: {values:?}");
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            format!("wintasks: unexpected argument `--unknown`\n{USAGE}\n"),
+            "args: {values:?}"
+        );
+    }
+}
+
+#[test]
+fn help_writes_canonical_output_without_reading_definitions() {
+    let directory = tempfile::tempdir().unwrap();
+    for values in [
+        &["--help"][..],
+        &["-h"][..],
+        &["--help", "--dry-run"][..],
+        &["-h", "--render"][..],
+        &["--help", "--dry-run", "--render"][..],
+        &["-h", "--dry-run", "--render"][..],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
+            .current_dir(directory.path())
+            .args(values)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "args: {values:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), EXPECTED_HELP);
+        assert!(output.stderr.is_empty(), "args: {values:?}");
+    }
+}
+
+#[test]
+fn dry_run_and_render_write_usage_error() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = wintasks::run(
+        &args(&["--dry-run", "--render"]),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        format!("wintasks: --dry-run and --render cannot be used together\n{USAGE}\n")
     );
 }
 
