@@ -1,26 +1,48 @@
 use wintasks::{USAGE, parse_cli};
 
-const EXPECTED_HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks [OPTIONS]\n\nOptions:\n  --dry-run    Show planned changes without modifying the system\n  --path FILE  Read task definitions from FILE (default: wintasks.yaml)\n  -h, --help   Show this help message\n";
+const EXPECTED_HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks --mount FOLDER [OPTIONS]\n\nOptions:\n  --mount FOLDER  Synchronize tasks under this Task Scheduler folder\n  --dry-run       Show planned changes without modifying the system\n  --path FILE     Read task definitions from FILE (default: wintasks.yaml)\n  -h, --help      Show this help message\n";
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
 
 #[test]
-fn no_subcommand_is_the_default_sync_invocation() {
+fn mount_is_required_for_sync_invocation() {
     assert_eq!(
-        parse_cli(&[]).unwrap(),
+        parse_cli(&args(&["--mount", "WinTasks"])).unwrap(),
         wintasks::CliOptions {
             dry_run: false,
+            mount: Some("WinTasks".to_string()),
             path: "wintasks.yaml".to_string(),
             help: false,
         }
+    );
+    assert_eq!(
+        parse_cli(&[]).unwrap_err(),
+        "--mount requires a folder path"
+    );
+}
+
+#[test]
+fn missing_mount_is_a_usage_error() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = wintasks::run(&[], &mut stdout, &mut stderr);
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        format!("wintasks: --mount requires a folder path\n{USAGE}\n")
     );
 }
 
 #[test]
 fn cli_options_are_parsed() {
-    assert!(parse_cli(&args(&["--dry-run"])).unwrap().dry_run);
+    assert!(
+        parse_cli(&args(&["--mount", "WinTasks", "--dry-run"]))
+            .unwrap()
+            .dry_run
+    );
     assert!(parse_cli(&args(&["--help"])).unwrap().help);
     assert!(parse_cli(&args(&["-h"])).unwrap().help);
     assert!(
@@ -29,8 +51,17 @@ fn cli_options_are_parsed() {
             .help
     );
     assert_eq!(
-        parse_cli(&args(&["--path", "input.yaml"])).unwrap().path,
+        parse_cli(&args(&["--mount", "Other", "--path", "input.yaml"]))
+            .unwrap()
+            .path,
         "input.yaml"
+    );
+    assert_eq!(
+        parse_cli(&args(&["--mount", "Other"]))
+            .unwrap()
+            .mount
+            .as_deref(),
+        Some("Other")
     );
     for invalid in [
         ["--render"].as_slice(),
@@ -38,7 +69,9 @@ fn cli_options_are_parsed() {
         ["render"].as_slice(),
         ["--path=input.yaml"].as_slice(),
         ["--path"].as_slice(),
-        ["--mount", "Other"].as_slice(),
+        ["--mount"].as_slice(),
+        ["--mount", "--help"].as_slice(),
+        ["--mount=Other"].as_slice(),
         ["--prune"].as_slice(),
     ] {
         assert!(parse_cli(&args(invalid)).is_err(), "{invalid:?}");
@@ -82,6 +115,8 @@ fn help_writes_canonical_output_without_reading_definitions() {
         &["-h"][..],
         &["--help", "--dry-run"][..],
         &["--help", "--path", "custom.yaml"][..],
+        &["--help", "--mount", "WinTasks"][..],
+        &["--mount", "WinTasks", "--help"][..],
         &["-h", "--dry-run", "--path", "custom.yaml"][..],
     ] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
@@ -96,11 +131,32 @@ fn help_writes_canonical_output_without_reading_definitions() {
 }
 
 #[test]
+fn invalid_mount_exits_one_before_scheduler_query() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("custom.yaml"),
+        "- name: task\n  trigger: { type: now, value: x }\n  action: { command: cmd.exe }\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
+        .current_dir(directory.path())
+        .args(["--mount", "\\", "--path", "custom.yaml"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "wintasks: custom.yaml: mount must be a non-root folder path\n"
+    );
+}
+
+#[test]
 fn path_error_uses_the_custom_definition_file() {
     let directory = tempfile::tempdir().unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
         .current_dir(directory.path())
-        .args(["--path", "custom.yaml"])
+        .args(["--mount", "WinTasks", "--path", "custom.yaml"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
@@ -116,7 +172,7 @@ fn path_parse_error_uses_the_custom_definition_file() {
     std::fs::write(directory.path().join("custom.yaml"), "mount: WinTasks\n").unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
         .current_dir(directory.path())
-        .args(["--path", "custom.yaml"])
+        .args(["--mount", "WinTasks", "--path", "custom.yaml"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
@@ -131,6 +187,7 @@ fn missing_definitions_file_exits_one_with_error_and_no_usage() {
     let directory = tempfile::tempdir().unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
         .current_dir(directory.path())
+        .args(["--mount", "WinTasks"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));

@@ -1,7 +1,7 @@
 mod common;
 
 use common::{FIXED_NOW, definitions};
-use wintasks::apply::{SyncOptions, run_apply};
+use wintasks::apply::{ApplyRequest, SyncOptions, run_apply};
 use wintasks::def::parse_defs;
 use wintasks::schtasks::{Schtasks, SchtasksError};
 use wintasks::xml::render_task_xml;
@@ -51,8 +51,11 @@ fn run(yaml: &str, dry_run: bool, scheduler: &mut FakeSchtasks) -> (i32, String,
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = run_apply(
-        yaml,
-        "wintasks.yaml",
+        &ApplyRequest {
+            yaml_text: yaml,
+            file: "wintasks.yaml",
+            mount: "WinTasks",
+        },
         &SyncOptions { dry_run },
         scheduler,
         FIXED_NOW,
@@ -85,7 +88,7 @@ fn creates_desired_tasks_and_deletes_all_omitted_tasks_in_mount() {
     let (code, out, err) = run(&yaml, false, &mut scheduler);
     assert_eq!(code, 0, "{err}");
     assert_eq!(scheduler.creates, ["\\WinTasks\\cron\\backup"]);
-    let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
+    let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
     assert_eq!(
         scheduler.create_xmls[0],
         render_task_xml(&definitions.tasks[0], FIXED_NOW).unwrap()
@@ -305,8 +308,11 @@ fn query_failure_exits_immediately() {
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = run_apply(
-        &yaml,
-        "wintasks.yaml",
+        &ApplyRequest {
+            yaml_text: &yaml,
+            file: "wintasks.yaml",
+            mount: "WinTasks",
+        },
         &SyncOptions { dry_run: false },
         &mut scheduler,
         FIXED_NOW,
@@ -341,8 +347,11 @@ fn run_preflight(yaml: &str) -> (i32, String, String) {
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = run_apply(
-        yaml,
-        "wintasks.yaml",
+        &ApplyRequest {
+            yaml_text: yaml,
+            file: "wintasks.yaml",
+            mount: "WinTasks",
+        },
         &SyncOptions { dry_run: false },
         &mut PreflightFailure,
         FIXED_NOW,
@@ -358,11 +367,11 @@ fn run_preflight(yaml: &str) -> (i32, String, String) {
 
 #[test]
 fn yaml_parse_failure_exits_one_before_query() {
-    let (code, out, err) = run_preflight("mount: WinTasks\ntasks: [\n");
+    let (code, out, err) = run_preflight("- name: broken\n  trigger: [\n");
     assert_eq!(code, 1);
     assert!(out.is_empty());
     assert!(
-        err.starts_with("wintasks: wintasks.yaml:3:1: "),
+        err.starts_with("wintasks: wintasks.yaml:3:"),
         "located parse errors must use `wintasks: <file>:<line>:<col>: `: {err}"
     );
 }

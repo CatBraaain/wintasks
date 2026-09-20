@@ -157,7 +157,7 @@ impl fmt::Display for DefError {
     }
 }
 
-pub fn parse_defs(text: &str, file: &str) -> Result<Definitions, DefError> {
+pub fn parse_defs(text: &str, file: &str, mount: &str) -> Result<Definitions, DefError> {
     if matches!(
         serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text),
         Ok(value) if value.is_null()
@@ -166,7 +166,11 @@ pub fn parse_defs(text: &str, file: &str) -> Result<Definitions, DefError> {
             message: format!("{file}: no task definitions found (file is empty or null)"),
         });
     }
-    let definitions = serde_yaml_ng::from_str(text).map_err(|error| yaml_error(file, error))?;
+    let tasks = serde_yaml_ng::from_str(text).map_err(|error| yaml_error(file, error))?;
+    let definitions = Definitions {
+        mount: mount.to_string(),
+        tasks,
+    };
     validate(&definitions, file)?;
     Ok(definitions)
 }

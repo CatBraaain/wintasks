@@ -1,45 +1,43 @@
 # wintasks CLI spec
 
-cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタスク登録 XML に変換し、YAML に宣言した mount folder 配下のタスクを登録・更新・削除する Windows 向け CLI。YAML が mount folder と desired state を定め、コマンド実行後にその配下のタスクが YAML の定義に一致する。
+cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタスク登録 XML に変換し、`--mount` で指定した mount folder 配下のタスクを登録・更新・削除する Windows 向け CLI。YAML が desired state を定め、コマンド実行後に指定した mount folder 配下のタスクが YAML の定義に一致する。
 
 タスクの管理対象は Description ではなく mount folder で決まる。指定した mount folder 配下のタスクは、Description の内容にかかわらずこの CLI が管理する。mount folder の外にあるタスクは変更しない。
 
-コマンドの既定動作はサブコマンドなしの `wintasks` であり、YAML とシステムを同期する。`wintasks --dry-run` はシステムを変更せず差分を表示する。`--path FILE` は読み込む定義ファイルを指定し、省略時は `wintasks.yaml` を使う。`--help` と `-h` は同じヘルプ表示として扱い、他のオプションと同時に指定した場合もヘルプを優先する。
+コマンドの既定動作はサブコマンドなしの `wintasks` であり、`--mount FOLDER` で指定した mount folder と YAML を同期する。`--mount` は `--help` または `-h` 以外の実行で必須とする。`wintasks --mount FOLDER --dry-run` はシステムを変更せず差分を表示する。`--path FILE` は読み込む定義ファイルを指定し、省略時は `wintasks.yaml` を使う。`--help` と `-h` は同じヘルプ表示として扱い、他のオプションと同時に指定した場合もヘルプを優先する。
 
 オプション:
 
 | オプション | 既定値 | 意味 |
 |---|---|---|
-| なし | — | YAML と mount folder を同期する |
+| `--mount FOLDER` | 必須 | 同期対象とする Task Scheduler の mount folder |
 | `--dry-run` | なし | システムを変更せず変更計画と差分を表示する |
 | `--path FILE` | `wintasks.yaml` | FILE の YAML を定義ファイルとして読み込む |
-| `-h`, `--help` | なし | ヘルプを stdout に表示して終了する。定義ファイルを読み込まず、システムを変更しない |
+| `-h`, `--help` | なし | ヘルプを stdout に表示して終了する。`--mount` なしでも実行でき、定義ファイルを読み込まず、システムを変更しない |
 
 `wintasks --help` または `wintasks -h` は終了コード 0 で、次の文字列を stdout に出力する。出力の各行と末尾の改行を含めて正本とする。
 
 ```text
 wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml
 
-Usage: wintasks [OPTIONS]
+Usage: wintasks --mount FOLDER [OPTIONS]
 
 Options:
-  --dry-run    Show planned changes without modifying the system
-  --path FILE  Read task definitions from FILE (default: wintasks.yaml)
-  -h, --help   Show this help message
+  --mount FOLDER  Synchronize tasks under this Task Scheduler folder
+  --dry-run       Show planned changes without modifying the system
+  --path FILE     Read task definitions from FILE (default: wintasks.yaml)
+  -h, --help      Show this help message
 ```
 
-`--help` または `-h` は `--dry-run` または `--path FILE` と同時に指定でき、ヘルプだけを出力する。認識できない引数を含む場合は、ヘルプオプションがあっても usage エラーとなる。`--path=FILE` 形式は受け付けず、`--path FILE` 形式を使う。
+`--help` または `-h` は `--mount FOLDER`、`--dry-run` または `--path FILE` と同時に指定でき、ヘルプだけを出力する。認識できない引数を含む場合は、ヘルプオプションがあっても usage エラーとなる。`--mount` の直後にオプション形式のトークンがある場合は、フォルダ値の欠落として usage エラーとなる。`--mount=FOLDER` と `--path=FILE` 形式は受け付けず、それぞれ `--mount FOLDER` と `--path FILE` 形式を使う。
 
-定義ファイルは `--path FILE` で指定し、省略時は `wintasks.yaml` を使う。FILE が相対パスのときは、コマンド実行時のカレントディレクトリから解決する。読み込みまたはパースに失敗したときは、指定した FILE をエラーに表示する。引数が不正な場合は usage を表示して非ゼロ終了する。
+定義ファイルは `--path FILE` で指定し、省略時は `wintasks.yaml` を使う。FILE が相対パスのときは、コマンド実行時のカレントディレクトリから解決する。読み込みまたはパースに失敗したときは、指定した FILE をエラーに表示する。`--mount FOLDER` がない場合、または引数が不正な場合は usage を表示して非ゼロ終了する。
 
 ## YAML スキーマ
 
-ファイル全体は `mount` と `tasks` を持つマッピングである。`tasks` に複数のタスク定義を書ける。空のファイルや null ドキュメントはエラーとする。`tasks: []` はタスク 0 件の正常な desired state として受容する。キーは snake_case であり、定義されていないキーが現れたらエラーとする。
+ファイル全体はタスク定義の配列である。空の配列はタスク 0 件の正常な desired state として受容する。空のファイルや null ドキュメントはエラーとする。各タスク定義のキーは snake_case であり、定義されていないキーが現れたらエラーとする。
 
-| キー | 必須 | 値 |
-|---|---|---|
-| `mount` | 必須 | Task Scheduler の root ではないフォルダパス。1 個以上のフォルダ名を `\` で区切った相対パスとし、空文字、`\`、先頭または末尾が `\` の値はエラーとする |
-| `tasks` | 必須 | タスク定義のリスト |
+`--mount FOLDER` は Task Scheduler の root ではないフォルダパスである。1 個以上のフォルダ名を `\` で区切った相対パスとし、空文字、`\`、先頭または末尾が `\` の値はエラーとする。
 
 | キー | 必須 | 値 |
 |---|---|---|
@@ -72,7 +70,7 @@ setting 定義:
 
 ## タスクパス
 
-Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガーの type>\<name>` である。トリガーが配列のとき、先頭要素の type を使う。`mount: WinTasks`、`name: backup`、先頭トリガーが `cron` のタスクパスは `\WinTasks\cron\backup` である。
+Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガーの type>\<name>` である。トリガーが配列のとき、先頭要素の type を使う。`--mount WinTasks`、`name: backup`、先頭トリガーが `cron` のタスクパスは `\WinTasks\cron\backup` である。
 
 タスク定義の `name` はタスクパスの末尾要素である。同期対象は mount folder 自身と、そのすべての子フォルダにあるタスクである。desired state にない同期対象タスクは削除する。
 
@@ -93,16 +91,14 @@ Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガー�
 次の YAML 定義を、実行日が 2026-09-20 で実行時刻が 2026-09-20T09:00:00 より前である場合に変換した出力は:
 
 ```yaml
-mount: WinTasks
-tasks:
-  - name: backup
-    trigger:
-      type: cron
-      value: "0 9 * * MON"
-    action:
-      command: C:\Tools\backup.exe
-      args: --full
-      working_directory: C:\Backup
+- name: backup
+  trigger:
+    type: cron
+    value: "0 9 * * MON"
+  action:
+    command: C:\Tools\backup.exe
+    args: --full
+    working_directory: C:\Backup
 ```
 
 ```xml
@@ -228,11 +224,9 @@ trigger 種別の選択:
 トリガー定義の行は、テスト側が次の最小タスクでラップする:
 
 ```yaml
-mount: Test
-tasks:
-  - name: sample
-    trigger: { type: <type>, value: "<value>" }
-    action: { command: cmd.exe }
+- name: sample
+  trigger: { type: <type>, value: "<value>" }
+  action: { command: cmd.exe }
 ```
 
 実行時刻のセルは cron の行では必須であり、それ以外の行では無視される。
@@ -248,7 +242,7 @@ tasks:
 | `cron` | `*/15 9-17 * * *` | 2026-01-15 10:00 | `<CalendarTrigger><StartBoundary>2026-01-16T09:00:00</StartBoundary><Repetition><Interval>PT15M</Interval><Duration>PT9H</Duration></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>` |
 | `cron` | `0,30 9,21 * * *` | 2026-01-15 10:00 | `<CalendarTrigger><StartBoundary>2026-01-16T09:00:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-16T09:30:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-15T21:00:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger><CalendarTrigger><StartBoundary>2026-01-15T21:30:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>` |
 
-アクション定義の行は、トリガーを `{ type: now, value: "x" }` として同じ YAML の `tasks` 配下でラップする。空のセルのキーは書かない。
+アクション定義の行は、トリガーを `{ type: now, value: "x" }` として同じ YAML のルート配列でラップする。空のセルのキーは書かない。
 
 | command | args | working_directory | 期待 XML |
 |---|---|---|---|
@@ -260,7 +254,7 @@ tasks:
 
 `wintasks` は次の順序で YAML と mount folder を同期する。
 
-1. `--path FILE` で指定されたファイル（省略時は `wintasks.yaml`）を読み込みパースする。パースエラー、mount の形式エラー、name 重複、XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する。
+1. `--path FILE` で指定されたファイル（省略時は `wintasks.yaml`）を読み込みパースし、`--mount FOLDER` の形式を検証する。パースエラー、mount の形式エラー、name 重複、XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する。
 2. `schtasks /Query /XML` でシステム上の全タスクの XML を取得する。`/Query` の出力は BOM 付き UTF-16 または UTF-8 で返るため、BOM で判別してデコードする。BOM がなければ UTF-8 として読む。query 出力の 1 文書をパースできなかったときは、その文書以降を無視し、それまでに読めたタスクだけで処理を続行する。
 3. タスクパスが mount folder 自身またはその子フォルダにあるタスクだけを同期対象とする。mount folder の外にあるタスクは分類・変更しない。
 4. desired state の各タスクと同期対象の既存タスクをタスクパスで比較し、次のように分類する。
@@ -313,7 +307,7 @@ update \WinTasks\cron\backup
 即時に終了するエラーは `wintasks: <メッセージ>` の形式である。
 
 - ファイル読み取り失敗: `wintasks: <path>: <入出力エラーの内容>`
-- YAML パースエラー: 発生位置が分かるときは `wintasks: <file>:<line>:<col>: <原因>`、分からないときは `wintasks: <file>: <原因>`。name 重複は `wintasks: <file>: duplicate task name `<name>``、空または null ドキュメントは `wintasks: <file>: no task definitions found (file is empty or null)`、root mount は `wintasks: <file>: mount must be a non-root folder path`
+- YAML パースエラー: 発生位置が分かるときは `wintasks: <file>:<line>:<col>: <原因>`、分からないときは `wintasks: <file>: <原因>`。name 重複は `wintasks: <file>: duplicate task name `<name>``、空または null ドキュメントは `wintasks: <file>: no task definitions found (file is empty or null)`。mount 形式エラーは `wintasks: <file>: mount must be a non-root folder path`
 - XML 生成エラー: `wintasks: <path>: XML generation failed for task `<name>`: <原因>`
 - `/Query` の失敗: `wintasks: schtasks /Query /XML failed: <schtasks の標準エラー出力>`
 

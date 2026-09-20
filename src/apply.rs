@@ -13,6 +13,12 @@ pub struct SyncOptions {
     pub dry_run: bool,
 }
 
+pub struct ApplyRequest<'a> {
+    pub yaml_text: &'a str,
+    pub file: &'a str,
+    pub mount: &'a str,
+}
+
 pub fn task_path(definition: &TaskDef, mount: &str) -> String {
     format!(
         "\\{mount}\\{}\\{}",
@@ -35,19 +41,26 @@ struct PlannedTask {
 }
 
 pub fn run_apply(
-    yaml_text: &str,
-    file: &str,
+    request: &ApplyRequest<'_>,
     options: &SyncOptions,
     scheduler: &mut dyn Schtasks,
     now: NaiveDateTime,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    let definitions = match parse_defs(yaml_text, file) {
+    let definitions = match parse_defs(request.yaml_text, request.file, request.mount) {
         Ok(definitions) => definitions,
         Err(error) => return fail(&error.to_string(), err),
     };
-    run_sync(&definitions, file, options, scheduler, now, out, err)
+    run_sync(
+        &definitions,
+        request.file,
+        options,
+        scheduler,
+        now,
+        out,
+        err,
+    )
 }
 
 pub fn run_sync(

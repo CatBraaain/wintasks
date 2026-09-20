@@ -17,7 +17,7 @@ fn renders_spec_xml_shape_without_management_metadata() {
     let yaml = definitions(
         "  - name: backup\n    trigger: { type: cron, value: '0 9 * * MON' }\n    action: { command: 'C:\\Tools\\backup.exe', args: --full, working_directory: 'C:\\Backup' }\n",
     );
-    let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
+    let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
     let xml = render_task_xml(&definitions.tasks[0], now()).unwrap();
     assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">"));
     assert!(xml.contains("  <RegistrationInfo/>\n  <Triggers>"));
@@ -36,7 +36,7 @@ fn renders_the_spec_example_as_the_exact_full_document() {
     let yaml = definitions(
         "  - name: backup\n    trigger:\n      type: cron\n      value: \"0 9 * * MON\"\n    action:\n      command: C:\\Tools\\backup.exe\n      args: --full\n      working_directory: C:\\Backup\n",
     );
-    let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
+    let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
     let xml = render_task_xml(&definitions.tasks[0], now()).unwrap();
     let expected = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -80,7 +80,7 @@ fn renders_all_trigger_types_and_actions() {
     let yaml = definitions(
         "  - name: many\n    trigger:\n      - { type: startup, value: '01:30' }\n      - { type: boot, value: '00:30' }\n      - { type: once, value: '2030-06-01' }\n      - { type: now, value: unused }\n    action:\n      - { command: cmd.exe }\n      - { command: 'C:\\Tools\\a.exe', args: --one }\n",
     );
-    let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
+    let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
     let output = render_task_xml(&definitions.tasks[0], now()).unwrap();
     assert!(output.contains("<Delay>PT1H30M</Delay>"));
     assert!(output.contains("<Delay>PT30M</Delay>"));
@@ -125,7 +125,7 @@ fn root_child_order_and_settings_are_exact() {
     let yaml = definitions(
         "  - name: admin\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n    setting: { run_as: true, logon_type: s4u }\n",
     );
-    let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
+    let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
     let xml = render_task_xml(&definitions.tasks[0], now()).unwrap();
     let positions = [
         xml.find("<RegistrationInfo/>").unwrap(),
@@ -200,7 +200,7 @@ fn documented_conversion_cases_match_expected_fragments() {
         let yaml = definitions(&format!(
             "  - name: sample\n    trigger: {{ type: {kind}, value: '{value}' }}\n    action: {{ command: cmd.exe }}\n"
         ));
-        let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
+        let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
         let xml = render_task_xml(&definitions.tasks[0], time).unwrap();
         let triggers = xml
             .split_once("<Triggers>")
@@ -243,7 +243,7 @@ fn documented_conversion_cases_match_expected_fragments() {
         let yaml = definitions(&format!(
             "  - name: sample\n    trigger: {{ type: now, value: x }}\n    action: {{ command: '{command}'{args}{directory} }}\n"
         ));
-        let definitions = parse_defs(&yaml, "wintasks.yaml").unwrap();
+        let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
         let xml = render_task_xml(&definitions.tasks[0], now()).unwrap();
         let actions = xml
             .split_once("<Actions>")

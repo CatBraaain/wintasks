@@ -16,8 +16,9 @@ use crate::def::parse_defs;
 use crate::schtasks::CommandSchtasks;
 
 const DEFAULT_DEFINITIONS_FILE: &str = "wintasks.yaml";
-pub const USAGE: &str = "usage: wintasks [--dry-run] [--path FILE] [--help | -h]";
-pub const HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks [OPTIONS]\n\nOptions:\n  --dry-run    Show planned changes without modifying the system\n  --path FILE  Read task definitions from FILE (default: wintasks.yaml)\n  -h, --help   Show this help message\n";
+pub const USAGE: &str =
+    "usage: wintasks --mount FOLDER [--dry-run] [--path FILE]\n       wintasks [--help | -h]";
+pub const HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks --mount FOLDER [OPTIONS]\n\nOptions:\n  --mount FOLDER  Synchronize tasks under this Task Scheduler folder\n  --dry-run       Show planned changes without modifying the system\n  --path FILE     Read task definitions from FILE (default: wintasks.yaml)\n  -h, --help      Show this help message\n";
 
 pub fn now_local() -> chrono::NaiveDateTime {
     Local::now().naive_local()
@@ -36,7 +37,11 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         Ok(text) => text,
         Err(read_error) => return error(&format!("{}: {read_error}", options.path), err),
     };
-    let definitions = match parse_defs(&definitions_text, &options.path) {
+    let mount = options
+        .mount
+        .as_deref()
+        .expect("mount is required unless help is requested");
+    let definitions = match parse_defs(&definitions_text, &options.path, mount) {
         Ok(definitions) => definitions,
         Err(parse_error) => return error(&parse_error.to_string(), err),
     };
@@ -57,6 +62,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> u8 {
 #[derive(Debug, PartialEq, Eq)]
 pub struct CliOptions {
     pub dry_run: bool,
+    pub mount: Option<String>,
     pub path: String,
     pub help: bool,
 }
@@ -64,6 +70,7 @@ pub struct CliOptions {
 pub fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
     let mut options = CliOptions {
         dry_run: false,
+        mount: None,
         path: DEFAULT_DEFINITIONS_FILE.to_string(),
         help: false,
     };
@@ -71,6 +78,15 @@ pub fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--dry-run" => options.dry_run = true,
+            "--mount" => {
+                let mount = arguments
+                    .next()
+                    .ok_or_else(|| "--mount requires a folder path".to_string())?;
+                if mount.starts_with('-') {
+                    return Err("--mount requires a folder path".to_string());
+                }
+                options.mount = Some(mount.clone());
+            }
             "--path" => {
                 options.path = arguments
                     .next()
@@ -80,6 +96,9 @@ pub fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
             "--help" | "-h" => options.help = true,
             _ => return Err(format!("unexpected argument `{argument}`")),
         }
+    }
+    if !options.help && options.mount.is_none() {
+        return Err("--mount requires a folder path".to_string());
     }
     Ok(options)
 }

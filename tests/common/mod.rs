@@ -10,5 +10,9 @@ pub const FIXED_NOW: chrono::NaiveDateTime = match chrono::NaiveDate::from_ymd_o
 };
 
 pub fn definitions(tasks: &str) -> String {
-    format!("mount: WinTasks\ntasks:\n{tasks}")
+    tasks
+        .lines()
+        .map(|line| line.strip_prefix("  ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

@@ -9,7 +9,8 @@ fn render(expression: &str) -> Result<String, String> {
     let yaml = definitions(&format!(
         "  - name: task\n    trigger: {{ type: cron, value: '{expression}' }}\n    action: {{ command: cmd.exe }}\n"
     ));
-    let definitions = parse_defs(&yaml, "wintasks.yaml").map_err(|error| error.to_string())?;
+    let definitions =
+        parse_defs(&yaml, "wintasks.yaml", "WinTasks").map_err(|error| error.to_string())?;
     let now = NaiveDate::from_ymd_opt(2026, 1, 15)
         .unwrap()
         .and_hms_opt(10, 0, 0)
