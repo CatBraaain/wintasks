@@ -383,6 +383,7 @@ fn normalize_node(mut node: XmlNode) -> Result<XmlNode, String> {
     if name == "RegistrationInfo" {
         node.content.clear();
     }
+    sort_owned_children(&name, &mut node.content);
     if name == "Task" {
         sort_task_children(&mut node.content);
     }
@@ -417,6 +418,24 @@ fn text_content(node: &XmlNode) -> String {
             XmlContent::Element(_) | XmlContent::Reference(_) => None,
         })
         .collect()
+}
+
+fn sort_owned_children(parent: &str, content: &mut [XmlContent]) {
+    let order = |child: &str| match (parent, child) {
+        ("Principal", "RunLevel") => 0,
+        ("Principal", "LogonType") => 1,
+        ("Settings", "StartWhenAvailable") => 0,
+        ("Settings", "DisallowStartIfOnBatteries") => 1,
+        ("Settings", "StopIfGoingOnBatteries") => 2,
+        _ => 3,
+    };
+    if !matches!(parent, "Principal" | "Settings") {
+        return;
+    }
+    content.sort_by_key(|content| match content {
+        XmlContent::Element(node) => order(&local_name(&node.name)),
+        _ => 3,
+    });
 }
 
 fn sort_task_children(content: &mut [XmlContent]) {

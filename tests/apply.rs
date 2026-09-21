@@ -201,6 +201,40 @@ fn mixed_sync_fixture() -> (String, FakeSchtasks) {
 }
 
 #[test]
+fn dry_run_ignores_owned_principal_and_settings_reordering() {
+    let yaml = definitions(ONE_TASK);
+    let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
+    let desired = render_task_xml(&definitions.tasks[0], FIXED_NOW).unwrap();
+    let current = desired
+        .replace(
+            "<RegistrationInfo/>",
+            "<RegistrationInfo><URI>\\WinTasks\\cron\\backup</URI></RegistrationInfo>",
+        )
+        .replace(
+            "      <RunLevel>LeastPrivilege</RunLevel>\n      <LogonType>InteractiveToken</LogonType>",
+            "      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>",
+        )
+        .replace(
+            "    <StartWhenAvailable>true</StartWhenAvailable>\n    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
+            "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n    <StartWhenAvailable>true</StartWhenAvailable>\n    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
+        );
+    let mut scheduler = FakeSchtasks {
+        query_xml: current,
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+
+    let (code, out, err) = run(&yaml, true, &mut scheduler);
+
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "No changes.\n");
+    assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
+}
+
+#[test]
 fn mixed_sync_reports_definition_order_then_delete_and_orders_scheduler_calls() {
     let (yaml, mut scheduler) = mixed_sync_fixture();
     let (code, out, err) = run(&yaml, false, &mut scheduler);

@@ -141,6 +141,17 @@ fn normalizing_scheduler_reordering_and_zero_delays_is_stable() {
 }
 
 #[test]
+fn normalizing_reorders_owned_principal_and_settings_children() {
+    let current = "<Task><Principals><Principal><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries></Settings></Task>";
+    let desired = "<Task><Principals><Principal><RunLevel>LeastPrivilege</RunLevel><LogonType>InteractiveToken</LogonType></Principal></Principals><Settings><StartWhenAvailable>true</StartWhenAvailable><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries></Settings></Task>";
+
+    assert_eq!(
+        normalized_task_xml(current).unwrap(),
+        normalized_task_xml(desired).unwrap()
+    );
+}
+
+#[test]
 fn normalizing_preserves_entity_references_and_ignores_cdata_whitespace() {
     let current = "<Task><Actions><Exec><Arguments>a&amp;b</Arguments><Command><![CDATA[   ]]></Command></Exec></Actions></Task>";
     let desired = "<Task><Actions><Exec><Arguments>ab</Arguments><Command>   </Command></Exec></Actions></Task>";
