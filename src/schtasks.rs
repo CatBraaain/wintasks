@@ -176,11 +176,13 @@ fn encode_task_xml(xml: &str) -> Vec<u8> {
     bytes
 }
 
-/// Parses concatenated Task XML documents until the first malformed document.
+/// Parses Task XML documents until the first malformed document.
 pub fn extract_tasks(xml_text: &str) -> Vec<ExistingTask> {
     let mut reader = Reader::from_str(xml_text);
     reader.config_mut().trim_text(false);
     let mut depth: usize = 0;
+    let mut task_depth = None;
+    let mut registration_info_depth = None;
     let mut path = String::new();
     let mut capture_uri = false;
     let mut task_xml: Option<Writer<Vec<u8>>> = None;
@@ -191,19 +193,23 @@ pub fn extract_tasks(xml_text: &str) -> Vec<ExistingTask> {
             Event::Start(event) => {
                 depth += 1;
                 let name = local_name(event.name().as_ref());
-                if depth == 1 && name == "Task" {
+                if task_depth.is_none() && name == "Task" {
                     let mut writer = Writer::new(Vec::new());
                     writer
                         .write_event(Event::Start(event.to_owned()))
                         .expect("writing to Vec succeeds");
                     task_xml = Some(writer);
+                    task_depth = Some(depth);
                     path.clear();
                 } else if let Some(writer) = task_xml.as_mut() {
                     writer
                         .write_event(Event::Start(event.to_owned()))
                         .expect("writing to Vec succeeds");
                 }
-                capture_uri = depth == 3 && name == "URI";
+                if task_depth == Some(depth - 1) && name == "RegistrationInfo" {
+                    registration_info_depth = Some(depth);
+                }
+                capture_uri = registration_info_depth == Some(depth - 1) && name == "URI";
             }
             Event::Empty(event) => {
                 if let Some(writer) = task_xml.as_mut() {
@@ -222,6 +228,16 @@ pub fn extract_tasks(xml_text: &str) -> Vec<ExistingTask> {
                     path.push_str(&text.xml_content(XmlVersion::Explicit1_0));
                 }
             }
+            Event::CData(text) => {
+                if let Some(writer) = task_xml.as_mut() {
+                    writer
+                        .write_event(Event::CData(text.to_owned()))
+                        .expect("writing to Vec succeeds");
+                }
+                if capture_uri {
+                    path.push_str(text.as_ref());
+                }
+            }
             Event::End(event) => {
                 let name = local_name(event.name().as_ref());
                 if let Some(writer) = task_xml.as_mut() {
@@ -229,7 +245,7 @@ pub fn extract_tasks(xml_text: &str) -> Vec<ExistingTask> {
                         .write_event(Event::End(event.to_owned()))
                         .expect("writing to Vec succeeds");
                 }
-                if depth == 1 && name == "Task" {
+                if task_depth == Some(depth) && name == "Task" {
                     if !path.is_empty() {
                         let xml = task_xml.take().expect("Task has XML").into_inner();
                         tasks.push(ExistingTask {
@@ -239,6 +255,10 @@ pub fn extract_tasks(xml_text: &str) -> Vec<ExistingTask> {
                     } else {
                         task_xml = None;
                     }
+                    task_depth = None;
+                    registration_info_depth = None;
+                } else if registration_info_depth == Some(depth) && name == "RegistrationInfo" {
+                    registration_info_depth = None;
                 }
                 capture_uri = false;
                 depth = depth.saturating_sub(1);

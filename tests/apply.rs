@@ -1,7 +1,7 @@
 mod common;
 
 use common::{FIXED_NOW, definitions};
-use wintasks::apply::{ApplyRequest, SyncOptions, run_apply};
+use wintasks::apply::{ApplyRequest, SyncOptions, run_apply, task_path};
 use wintasks::def::parse_defs;
 use wintasks::schtasks::{Schtasks, SchtasksError};
 use wintasks::xml::render_task_xml;
@@ -233,6 +233,52 @@ fn dry_run_reports_no_changes_when_nothing_needs_syncing() {
         fail_delete: None,
     };
     let (code, out, err) = run("[]\n", true, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "No changes.\n");
+    assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
+}
+
+#[test]
+fn wrapped_query_tasks_are_no_change() {
+    let yaml = definitions(
+        "  - name: startup\n    trigger: { type: now, value: x }\n    action: { command: startup.exe }\n  - name: SyncTime\n    trigger: { type: now, value: x }\n    action: { command: synctime.exe }\n",
+    );
+    let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
+    let query_xml = definitions
+        .tasks
+        .iter()
+        .enumerate()
+        .map(|(index, definition)| {
+            let path = task_path(definition, "WinTasks");
+            let desired = render_task_xml(definition, FIXED_NOW).unwrap();
+            let uri = if index == 0 {
+                format!("<URI>{path}</URI>")
+            } else {
+                format!("<URI><![CDATA[{path}]]></URI>")
+            };
+            desired
+                .replace(
+                    "<RegistrationInfo/>",
+                    &format!(
+                        "<RegistrationInfo>{uri}<Date>2026-01-15T10:00:00</Date></RegistrationInfo>"
+                    ),
+                )
+                .replace(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                    "<?xml version=\"1.0\" encoding=\"UTF-16\"?>",
+                )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut scheduler = FakeSchtasks {
+        query_xml: format!("<Tasks>{query_xml}</Tasks>"),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    let (code, out, err) = run(&yaml, true, &mut scheduler);
     assert_eq!(code, 0, "{err}");
     assert_eq!(out, "No changes.\n");
     assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
