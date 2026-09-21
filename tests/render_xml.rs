@@ -131,6 +131,32 @@ fn normalizing_ignores_scheduler_metadata_and_defaults() {
 }
 
 #[test]
+fn normalizing_scheduler_reordering_and_zero_delays_is_stable() {
+    let current = "<Task><Principals><Principal id=\"Author\"><RunLevel>LeastPrivilege</RunLevel><LogonType>InteractiveToken</LogonType></Principal></Principals><Settings><StartWhenAvailable>true</StartWhenAvailable></Settings><Triggers><BootTrigger/></Triggers><RegistrationInfo/></Task>";
+    let desired = "<Task><RegistrationInfo/><Triggers><BootTrigger><Delay>PT0S</Delay></BootTrigger></Triggers><Principals><Principal><RunLevel>LeastPrivilege</RunLevel><LogonType>InteractiveToken</LogonType></Principal></Principals><Settings><StartWhenAvailable>true</StartWhenAvailable></Settings></Task>";
+    assert_eq!(
+        normalized_task_xml(current).unwrap(),
+        normalized_task_xml(desired).unwrap()
+    );
+}
+
+#[test]
+fn normalizing_preserves_entity_references_and_ignores_cdata_whitespace() {
+    let current = "<Task><Actions><Exec><Arguments>a&amp;b</Arguments><Command><![CDATA[   ]]></Command></Exec></Actions></Task>";
+    let desired = "<Task><Actions><Exec><Arguments>ab</Arguments><Command>   </Command></Exec></Actions></Task>";
+    assert_ne!(
+        normalized_task_xml(current).unwrap(),
+        normalized_task_xml(desired).unwrap()
+    );
+
+    let equivalent = "<Task><Actions><Exec><Arguments>a&amp;b</Arguments><Command>   </Command></Exec></Actions></Task>";
+    assert_eq!(
+        normalized_task_xml(current).unwrap(),
+        normalized_task_xml(equivalent).unwrap()
+    );
+}
+
+#[test]
 fn root_child_order_and_settings_are_exact() {
     let yaml = definitions(
         "  - name: admin\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n    setting: { run_as: true, logon_type: s4u }\n",

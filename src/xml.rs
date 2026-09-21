@@ -238,116 +238,246 @@ fn text_element(writer: &mut XmlWriter, name: &str, text: &str) -> Result<(), st
     close(writer, name)
 }
 
+#[derive(Debug)]
+struct XmlNode {
+    name: String,
+    attributes: Vec<(String, String)>,
+    content: Vec<XmlContent>,
+}
+
+#[derive(Debug)]
+enum XmlContent {
+    Element(XmlNode),
+    Text(String),
+    CData(String),
+    Reference(String),
+}
+
 pub fn normalized_task_xml(xml: &str) -> Result<String, String> {
     if xml.is_empty() {
         return Ok(String::new());
     }
 
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(false);
+    let root = normalize_node(parse_xml(xml)?)?;
     let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
         .map_err(|error| error.to_string())?;
-
-    let mut elements = Vec::new();
-    let mut excluded_depth = 0;
-    loop {
-        match reader.read_event().map_err(|error| error.to_string())? {
-            Event::Start(event) => {
-                let name = local_name(event.name().as_ref());
-                let excluded = is_excluded(elements.last(), &name);
-                elements.push(name.clone());
-                if excluded_depth > 0 {
-                    excluded_depth += 1;
-                } else if name == "RegistrationInfo" {
-                    writer
-                        .write_event(Event::Empty(sorted_start(&event)?))
-                        .map_err(|error| error.to_string())?;
-                    excluded_depth = 1;
-                } else if excluded {
-                    excluded_depth = 1;
-                } else {
-                    writer
-                        .write_event(Event::Start(sorted_start(&event)?))
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            Event::Empty(event) if excluded_depth == 0 => {
-                let name = local_name(event.name().as_ref());
-                if !is_excluded(elements.last(), &name) {
-                    writer
-                        .write_event(Event::Empty(sorted_start(&event)?))
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            Event::End(event) => {
-                if excluded_depth > 0 {
-                    excluded_depth -= 1;
-                } else {
-                    writer
-                        .write_event(Event::End(event.into_owned()))
-                        .map_err(|error| error.to_string())?;
-                }
-                elements.pop();
-            }
-            Event::Text(event) if excluded_depth == 0 => {
-                if !event.xml_content(XmlVersion::Explicit1_0).trim().is_empty() {
-                    writer
-                        .write_event(Event::Text(event.into_owned()))
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            Event::Decl(_) => {}
-            Event::Eof => break,
-            event if excluded_depth == 0 => {
-                writer
-                    .write_event(event.into_owned())
-                    .map_err(|error| error.to_string())?;
-            }
-            _ => {}
-        }
-    }
+    write_normalized_node(&mut writer, &root)?;
     String::from_utf8(writer.into_inner()).map_err(|error| error.to_string())
 }
 
-fn is_excluded(parent: Option<&String>, name: &str) -> bool {
-    match parent.map(String::as_str) {
-        Some("RegistrationInfo") => true,
-        Some("CalendarTrigger") => matches!(name, "StartBoundary" | "Enabled" | "EndBoundary"),
-        Some("LogonTrigger" | "BootTrigger" | "TimeTrigger") => name == "Enabled",
-        Some("Principal") => !matches!(name, "RunLevel" | "LogonType"),
-        Some("Settings") => !matches!(
-            name,
+fn parse_xml(xml: &str) -> Result<XmlNode, String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut stack = Vec::new();
+    let mut root = None;
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(event) => stack.push(XmlNode {
+                name: String::from_utf8(event.name().as_ref().to_vec())
+                    .map_err(|error| error.to_string())?,
+                attributes: attributes(&event)?,
+                content: Vec::new(),
+            }),
+            Event::Empty(event) => append_node(
+                &mut root,
+                &mut stack,
+                XmlNode {
+                    name: String::from_utf8(event.name().as_ref().to_vec())
+                        .map_err(|error| error.to_string())?,
+                    attributes: attributes(&event)?,
+                    content: Vec::new(),
+                },
+            )?,
+            Event::End(_) => {
+                let node = stack
+                    .pop()
+                    .ok_or_else(|| "unexpected XML closing tag".to_string())?;
+                append_node(&mut root, &mut stack, node)?;
+            }
+            Event::Text(event) => {
+                if !event.xml_content(XmlVersion::Explicit1_0).trim().is_empty() {
+                    stack
+                        .last_mut()
+                        .ok_or_else(|| "text outside XML root".to_string())?
+                        .content
+                        .push(XmlContent::Text(
+                            event.into_owned().into_inner().into_owned(),
+                        ));
+                }
+            }
+            Event::CData(event) => {
+                if !event.xml_content(XmlVersion::Explicit1_0).trim().is_empty() {
+                    stack
+                        .last_mut()
+                        .ok_or_else(|| "CDATA outside XML root".to_string())?
+                        .content
+                        .push(XmlContent::CData(event.into_owned().into_inner().into_owned()));
+                }
+            }
+            Event::GeneralRef(event) => {
+                stack
+                    .last_mut()
+                    .ok_or_else(|| "entity reference outside XML root".to_string())?
+                    .content
+                    .push(XmlContent::Reference(event.into_owned().into_inner().into_owned()));
+            }
+            Event::Decl(_) | Event::Comment(_) | Event::DocType(_) | Event::PI(_) => {}
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    if !stack.is_empty() {
+        return Err("unexpected end of XML document".to_string());
+    }
+    root.ok_or_else(|| "XML document has no root element".to_string())
+}
+
+fn append_node(
+    root: &mut Option<XmlNode>,
+    stack: &mut [XmlNode],
+    node: XmlNode,
+) -> Result<(), String> {
+    if let Some(parent) = stack.last_mut() {
+        parent.content.push(XmlContent::Element(node));
+    } else if root.is_none() {
+        *root = Some(node);
+    } else {
+        return Err("XML document has multiple root elements".to_string());
+    }
+    Ok(())
+}
+
+fn attributes(event: &BytesStart<'_>) -> Result<Vec<(String, String)>, String> {
+    event
+        .attributes()
+        .map(|attribute| {
+            let attribute = attribute.map_err(|error| error.to_string())?;
+            Ok((
+                String::from_utf8(attribute.key.as_ref().to_vec())
+                    .map_err(|error| error.to_string())?,
+                String::from_utf8(attribute.value.into_owned())
+                    .map_err(|error| error.to_string())?,
+            ))
+        })
+        .collect()
+}
+
+fn normalize_node(mut node: XmlNode) -> Result<XmlNode, String> {
+    let name = local_name(&node.name);
+    node.attributes.retain(|(attribute, _)| {
+        !(name == "Principal" && local_name(attribute) == "id")
+            && !(name == "Actions" && local_name(attribute) == "Context")
+    });
+    node.attributes.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut normalized_content = Vec::new();
+    for content in node.content {
+        match content {
+            XmlContent::Element(child) if keep_child(&name, &child) => {
+                normalized_content.push(XmlContent::Element(normalize_node(child)?));
+            }
+            XmlContent::Element(_) => {}
+            content => normalized_content.push(content),
+        }
+    }
+    node.content = normalized_content;
+    if name == "RegistrationInfo" {
+        node.content.clear();
+    }
+    if name == "Task" {
+        sort_task_children(&mut node.content);
+    }
+    Ok(node)
+}
+
+fn keep_child(parent: &str, child: &XmlNode) -> bool {
+    let child_name = local_name(&child.name);
+    match parent {
+        "RegistrationInfo" => false,
+        "CalendarTrigger" => {
+            !matches!(child_name.as_str(), "StartBoundary" | "Enabled" | "EndBoundary")
+        }
+        "LogonTrigger" | "BootTrigger" | "TimeTrigger" => {
+            child_name != "Enabled"
+                && !(child_name == "Delay" && text_content(child).trim() == "PT0S")
+        }
+        "Principal" => matches!(child_name.as_str(), "RunLevel" | "LogonType"),
+        "Settings" => matches!(
+            child_name.as_str(),
             "StartWhenAvailable" | "DisallowStartIfOnBatteries" | "StopIfGoingOnBatteries"
         ),
-        _ => false,
+        _ => true,
     }
+}
+
+fn text_content(node: &XmlNode) -> String {
+    node.content
+        .iter()
+        .filter_map(|content| match content {
+            XmlContent::Text(text) | XmlContent::CData(text) => Some(text.as_str()),
+            XmlContent::Element(_) | XmlContent::Reference(_) => None,
+        })
+        .collect()
+}
+
+fn sort_task_children(content: &mut [XmlContent]) {
+    content.sort_by_key(|content| match content {
+        XmlContent::Element(node) => match local_name(&node.name).as_str() {
+            "RegistrationInfo" => 0,
+            "Triggers" => 1,
+            "Principals" => 2,
+            "Settings" => 3,
+            "Actions" => 4,
+            _ => 5,
+        },
+        _ => 5,
+    });
+}
+
+fn write_normalized_node(writer: &mut XmlWriter, node: &XmlNode) -> Result<(), String> {
+    let mut start = BytesStart::new(node.name.as_str());
+    for (name, value) in &node.attributes {
+        start.push_attribute((name.as_str(), value.as_str()));
+    }
+    if node.content.is_empty() {
+        writer
+            .write_event(Event::Empty(start))
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    writer
+        .write_event(Event::Start(start))
+        .map_err(|error| error.to_string())?;
+    for content in &node.content {
+        match content {
+            XmlContent::Element(child) => write_normalized_node(writer, child)?,
+            XmlContent::Text(text) => writer
+                .write_event(Event::Text(BytesText::from_escaped(text.as_str())))
+                .map_err(|error| error.to_string())?,
+            XmlContent::CData(text) => writer
+                .write_event(Event::Text(BytesText::new(text)))
+                .map_err(|error| error.to_string())?,
+            XmlContent::Reference(reference) => writer
+                .write_event(Event::GeneralRef(quick_xml::events::BytesRef::new(
+                    reference.as_str(),
+                )))
+                .map_err(|error| error.to_string())?,
+        }
+    }
+    writer
+        .write_event(Event::End(BytesEnd::new(node.name.as_str())))
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn local_name(name: &str) -> String {
     name.rsplit_once(':')
         .map_or_else(|| name.to_string(), |(_, local)| local.to_string())
-}
-
-fn sorted_start(event: &BytesStart<'_>) -> Result<BytesStart<'static>, String> {
-    let element_name = local_name(event.name().as_ref());
-    let mut attributes = event
-        .attributes()
-        .map(|attribute| attribute.map_err(|error| error.to_string()))
-        .filter(|attribute| {
-            attribute.as_ref().is_ok_and(|attribute| {
-                !(element_name == "Actions" && local_name(attribute.key.as_ref()) == "Context")
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    attributes.sort_by(|left, right| left.key.as_ref().cmp(right.key.as_ref()));
-
-    let mut sorted = BytesStart::new(event.name().as_ref().to_owned());
-    for attribute in attributes {
-        sorted.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
-    }
-    Ok(sorted)
 }
 
 pub fn task_xml_diff(current: &str, desired: &str) -> Result<Option<String>, String> {
