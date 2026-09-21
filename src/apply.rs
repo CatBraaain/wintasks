@@ -198,14 +198,6 @@ fn write_dry_run(
     deletions: &[ExistingTask],
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let has_changes = plan
-        .iter()
-        .any(|task| !matches!(task.action, Action::NoChange))
-        || !deletions.is_empty();
-    if !has_changes {
-        let _ = writeln!(out, "No changes.");
-        return Ok(());
-    }
     for task in plan {
         let _ = writeln!(out, "{} {}", label(&task.action), task.path);
         if let (Action::Update, Some(current_xml)) = (&task.action, &task.current_xml) {
@@ -254,7 +246,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_no_changes_for_a_no_change_plan() {
+    fn reports_each_no_change_entry_in_a_dry_run() {
         let path = "\\WinTasks\\now\\task".to_string();
         let mut current = BTreeMap::new();
         current.insert(
@@ -277,6 +269,6 @@ mod tests {
         assert!(matches!(plan[0].action, Action::NoChange));
         let mut output = Vec::new();
         write_dry_run(&plan, &[], &mut output).unwrap();
-        assert_eq!(output, b"No changes.\n");
+        assert_eq!(output, b"no-change \\WinTasks\\now\\task\n");
     }
 }

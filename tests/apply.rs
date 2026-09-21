@@ -174,7 +174,7 @@ fn query_metadata_and_case_differences_are_no_change() {
     };
     let (code, out, err) = run(&yaml, true, &mut scheduler);
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, "No changes.\n");
+    assert_eq!(out, "no-change \\WinTasks\\cron\\backup\n");
     assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
 }
 
@@ -230,7 +230,7 @@ fn dry_run_ignores_owned_principal_and_settings_reordering() {
     let (code, out, err) = run(&yaml, true, &mut scheduler);
 
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, "No changes.\n");
+    assert_eq!(out, "no-change \\WinTasks\\cron\\backup\n");
     assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
 }
 
@@ -257,7 +257,7 @@ fn mixed_sync_reports_definition_order_then_delete_and_orders_scheduler_calls() 
 }
 
 #[test]
-fn dry_run_reports_no_changes_when_nothing_needs_syncing() {
+fn dry_run_reports_no_output_for_an_empty_desired_state() {
     let mut scheduler = FakeSchtasks {
         query_xml: String::new(),
         creates: Vec::new(),
@@ -268,7 +268,7 @@ fn dry_run_reports_no_changes_when_nothing_needs_syncing() {
     };
     let (code, out, err) = run("[]\n", true, &mut scheduler);
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, "No changes.\n");
+    assert!(out.is_empty());
     assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
 }
 
@@ -314,7 +314,10 @@ fn wrapped_query_tasks_are_no_change() {
     };
     let (code, out, err) = run(&yaml, true, &mut scheduler);
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, "No changes.\n");
+    assert_eq!(
+        out,
+        "no-change \\WinTasks\\now\\startup\nno-change \\WinTasks\\now\\SyncTime\n"
+    );
     assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
 }
 
