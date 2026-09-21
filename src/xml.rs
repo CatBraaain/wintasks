@@ -178,7 +178,7 @@ fn write_principal(
         writer,
         "RunLevel",
         if run_level_highest {
-            "Highest"
+            "HighestAvailable"
         } else {
             "LeastPrivilege"
         },

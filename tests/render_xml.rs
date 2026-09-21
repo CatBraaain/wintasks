@@ -135,7 +135,7 @@ fn root_child_order_and_settings_are_exact() {
         xml.find("<Actions>").unwrap(),
     ];
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-    assert!(xml.contains("<RunLevel>Highest</RunLevel>"));
+    assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
     assert!(xml.contains("<LogonType>S4U</LogonType>"));
     assert!(xml.contains("<StartWhenAvailable>true</StartWhenAvailable>"));
     assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));

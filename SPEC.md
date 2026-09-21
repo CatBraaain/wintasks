@@ -82,7 +82,7 @@ Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガー�
 - インデントは 2 スペース。子要素を持たない要素は `<X/>` 形式で書く
 - ルート要素は `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`。ルートの直下要素の順序は RegistrationInfo → Triggers → Principals → Settings → Actions とする
 - `RegistrationInfo` に管理対象を示す Description やハッシュを出力しない。タスクの管理対象判定と変更判定は mount folder と XML の内容で行う
-- `Principals/Principal` は `RunLevel` と `LogonType` を持つ。`RunLevel` は `run_as: true` で `Highest`、それ以外で `LeastPrivilege`。`LogonType` は setting の `logon_type` を反映する（`s4u` → `S4U`、`interactive_token` → `InteractiveToken`）
+- `Principals/Principal` は `RunLevel` と `LogonType` を持つ。`RunLevel` は `run_as: true` で `HighestAvailable`、それ以外で `LeastPrivilege`。`LogonType` は setting の `logon_type` を反映する（`s4u` → `S4U`、`interactive_token` → `InteractiveToken`）
 - `Settings` は次の値を持つ。`StartWhenAvailable=true`、`DisallowStartIfOnBatteries=false`、`StopIfGoingOnBatteries=false`。これらにより、発火時刻を逃したタスクはできるだけ早く開始され、バッテリ駆動でも実行・継続される。他の Settings 要素は Task Scheduler XML の既定値とする
 - `Actions` はアクション定義ごとに 1 個の `<Exec>` を YAML の順序どおり並べる。`Command` は `command`、`Arguments` は `args`（未指定なら要素を書かない）、`WorkingDirectory` は `working_directory` の決定結果（決まらないなら要素を書かない）
 - `Triggers` はトリガー定義ごとの変換結果を YAML の順序どおり並べる
