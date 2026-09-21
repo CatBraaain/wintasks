@@ -276,8 +276,7 @@ fn parse_xml(xml: &str) -> Result<XmlNode, String> {
     loop {
         match reader.read_event().map_err(|error| error.to_string())? {
             Event::Start(event) => stack.push(XmlNode {
-                name: String::from_utf8(event.name().as_ref().to_vec())
-                    .map_err(|error| error.to_string())?,
+                name: event.name().as_ref().to_string(),
                 attributes: attributes(&event)?,
                 content: Vec::new(),
             }),
@@ -285,8 +284,7 @@ fn parse_xml(xml: &str) -> Result<XmlNode, String> {
                 &mut root,
                 &mut stack,
                 XmlNode {
-                    name: String::from_utf8(event.name().as_ref().to_vec())
-                        .map_err(|error| error.to_string())?,
+                    name: event.name().as_ref().to_string(),
                     attributes: attributes(&event)?,
                     content: Vec::new(),
                 },
@@ -326,7 +324,6 @@ fn parse_xml(xml: &str) -> Result<XmlNode, String> {
             }
             Event::Decl(_) | Event::Comment(_) | Event::DocType(_) | Event::PI(_) => {}
             Event::Eof => break,
-            _ => {}
         }
     }
 
@@ -357,10 +354,8 @@ fn attributes(event: &BytesStart<'_>) -> Result<Vec<(String, String)>, String> {
         .map(|attribute| {
             let attribute = attribute.map_err(|error| error.to_string())?;
             Ok((
-                String::from_utf8(attribute.key.as_ref().to_vec())
-                    .map_err(|error| error.to_string())?,
-                String::from_utf8(attribute.value.into_owned())
-                    .map_err(|error| error.to_string())?,
+                attribute.key.as_ref().to_string(),
+                attribute.value.into_owned(),
             ))
         })
         .collect()
