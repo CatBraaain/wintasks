@@ -1,7 +1,10 @@
 [package]
 name = "wintasks"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
+description = "Declarative Windows scheduled task synchronization tool"
+license = "MIT"
+repository = "https://github.com/CatBraaain/wintasks"
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }

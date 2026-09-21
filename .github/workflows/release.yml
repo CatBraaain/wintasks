@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Tag must use the vX.Y.Z format: $env:GITHUB_REF_NAME"
+          }
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "The release tag must point to a commit reachable from main"
+          }
+          cargo build --release --locked
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: wintasks-exe
+          path: target/release/wintasks.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: wintasks-exe
+          path: release
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release/wintasks.exe
+
+  winget:
+    if: github.ref_name != 'v0.0.1'
+    needs: release
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify release asset and existing WinGet package
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = "application/vnd.github+json"
+          }
+          $release = Invoke-RestMethod `
+            -Headers $headers `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}"
+          if (-not ($release.assets | Where-Object { $_.name -match '\.exe$' })) {
+            throw "The GitHub Release has no .exe asset"
+          }
+          Invoke-WebRequest `
+            -Method Head `
+            -Uri "https://github.com/microsoft/winget-pkgs/tree/master/manifests/c/CatBraaain/wintasks" `
+            -ErrorAction Stop | Out-Null
+
+      - name: Publish to WinGet
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: CatBraaain.wintasks
+          installers-regex: '\.exe$'
+          fork-user: CatBraaain
+          token: ${{ secrets.WINGET_TOKEN }}
