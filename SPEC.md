@@ -4,13 +4,13 @@ cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタ
 
 タスクの管理対象は Description ではなく mount folder で決まる。指定した mount folder 配下のタスクは、Description の内容にかかわらずこの CLI が管理する。mount folder の外にあるタスクは変更しない。
 
-コマンドの既定動作はサブコマンドなしの `wintasks` であり、`--mount FOLDER` で指定した mount folder と YAML を同期する。`--mount` は `--help` または `-h` 以外の実行で必須とする。`wintasks --mount FOLDER --dry-run` はシステムを変更せず差分を表示する。`--path FILE` は読み込む定義ファイルを指定し、省略時は `wintasks.yaml` を使う。`--help` と `-h` は同じヘルプ表示として扱い、他のオプションと同時に指定した場合もヘルプを優先する。
+コマンドの既定動作はサブコマンドなしの `wintasks` であり、`--mount FOLDER` で指定した mount folder と YAML を同期する。`--mount` を省略したときは `wintasks` を mount folder とする。`wintasks --mount FOLDER --dry-run` はシステムを変更せず差分を表示する。`--path FILE` は読み込む定義ファイルを指定し、省略時は `wintasks.yaml` を使う。`--help` と `-h` は同じヘルプ表示として扱い、他のオプションと同時に指定した場合もヘルプを優先する。
 
 オプション:
 
 | オプション | 既定値 | 意味 |
 |---|---|---|
-| `--mount FOLDER` | 必須 | 同期対象とする Task Scheduler の mount folder |
+| `--mount FOLDER` | `wintasks` | 同期対象とする Task Scheduler の mount folder |
 | `--dry-run` | なし | システムを変更せず変更計画と差分を表示する |
 | `--path FILE` | `wintasks.yaml` | FILE の YAML を定義ファイルとして読み込む |
 | `-h`, `--help` | なし | ヘルプを stdout に表示して終了する。`--mount` なしでも実行でき、定義ファイルを読み込まず、システムを変更しない |
@@ -20,10 +20,10 @@ cron 記法のタスク定義 YAML ファイルを Windows Task Scheduler のタ
 ```text
 wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml
 
-Usage: wintasks --mount FOLDER [OPTIONS]
+Usage: wintasks [OPTIONS]
 
 Options:
-  --mount FOLDER  Synchronize tasks under this Task Scheduler folder
+  --mount FOLDER  Synchronize tasks under this Task Scheduler folder (default: wintasks)
   --dry-run       Show planned changes without modifying the system
   --path FILE     Read task definitions from FILE (default: wintasks.yaml)
   -h, --help      Show this help message
@@ -31,7 +31,7 @@ Options:
 
 `--help` または `-h` は `--mount FOLDER`、`--dry-run` または `--path FILE` と同時に指定でき、ヘルプだけを出力する。認識できない引数を含む場合は、ヘルプオプションがあっても usage エラーとなる。`--mount` の直後にオプション形式のトークンがある場合は、フォルダ値の欠落として usage エラーとなる。`--mount=FOLDER` と `--path=FILE` 形式は受け付けず、それぞれ `--mount FOLDER` と `--path FILE` 形式を使う。
 
-定義ファイルは `--path FILE` で指定し、省略時は `wintasks.yaml` を使う。FILE が相対パスのときは、コマンド実行時のカレントディレクトリから解決する。読み込みまたはパースに失敗したときは、指定した FILE をエラーに表示する。`--mount FOLDER` がない場合、または引数が不正な場合は usage を表示して非ゼロ終了する。
+定義ファイルは `--path FILE` で指定し、省略時は `wintasks.yaml` を使う。FILE が相対パスのときは、コマンド実行時のカレントディレクトリから解決する。読み込みまたはパースに失敗したときは、指定した FILE をエラーに表示する。引数が不正な場合は usage を表示して非ゼロ終了する。
 
 ## YAML スキーマ
 
@@ -254,7 +254,7 @@ trigger 種別の選択:
 
 `wintasks` は次の順序で YAML と mount folder を同期する。
 
-1. `--path FILE` で指定されたファイル（省略時は `wintasks.yaml`）を読み込みパースし、`--mount FOLDER` の形式を検証する。パースエラー、mount の形式エラー、name 重複、XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する。
+1. `--path FILE` で指定されたファイル（省略時は `wintasks.yaml`）を読み込みパースし、`--mount FOLDER` の指定値（省略時は `wintasks`）の形式を検証する。パースエラー、mount の形式エラー、name 重複、XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する。
 2. `schtasks /Query /XML` でシステム上の全タスクの XML を取得する。`/Query` の出力は BOM 付き UTF-16 または UTF-8 で返るため、BOM で判別してデコードする。BOM がなければ UTF-8 として読む。query 出力の 1 文書をパースできなかったときは、その文書以降を無視し、それまでに読めたタスクだけで処理を続行する。
 3. タスクパスが mount folder 自身またはその子フォルダにあるタスクだけを同期対象とする。mount folder の外にあるタスクは分類・変更しない。
 4. desired state の各タスクと同期対象の既存タスクをタスクパスで比較し、次のように分類する。

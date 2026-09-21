@@ -1,38 +1,25 @@
 use wintasks::{USAGE, parse_cli};
 
-const EXPECTED_HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks --mount FOLDER [OPTIONS]\n\nOptions:\n  --mount FOLDER  Synchronize tasks under this Task Scheduler folder\n  --dry-run       Show planned changes without modifying the system\n  --path FILE     Read task definitions from FILE (default: wintasks.yaml)\n  -h, --help      Show this help message\n";
+const EXPECTED_HELP: &str = "wintasks - synchronize Windows Task Scheduler tasks from wintasks.yaml\n\nUsage: wintasks [OPTIONS]\n\nOptions:\n  --mount FOLDER  Synchronize tasks under this Task Scheduler folder (default: wintasks)\n  --dry-run       Show planned changes without modifying the system\n  --path FILE     Read task definitions from FILE (default: wintasks.yaml)\n  -h, --help      Show this help message\n";
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
 
 #[test]
-fn mount_is_required_for_sync_invocation() {
+fn mount_defaults_to_wintasks_and_can_be_overridden() {
     assert_eq!(
-        parse_cli(&args(&["--mount", "WinTasks"])).unwrap(),
+        parse_cli(&[]).unwrap(),
         wintasks::CliOptions {
             dry_run: false,
-            mount: Some("WinTasks".to_string()),
+            mount: Some("wintasks".to_string()),
             path: "wintasks.yaml".to_string(),
             help: false,
         }
     );
     assert_eq!(
-        parse_cli(&[]).unwrap_err(),
-        "--mount requires a folder path"
-    );
-}
-
-#[test]
-fn missing_mount_is_a_usage_error() {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let code = wintasks::run(&[], &mut stdout, &mut stderr);
-    assert_eq!(code, 2);
-    assert!(stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(stderr).unwrap(),
-        format!("wintasks: --mount requires a folder path\n{USAGE}\n")
+        parse_cli(&args(&["--mount", "WinTasks"])).unwrap().mount,
+        Some("WinTasks".to_string())
     );
 }
 
@@ -187,7 +174,6 @@ fn missing_definitions_file_exits_one_with_error_and_no_usage() {
     let directory = tempfile::tempdir().unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_wintasks"))
         .current_dir(directory.path())
-        .args(["--mount", "WinTasks"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
