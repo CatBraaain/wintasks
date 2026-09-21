@@ -85,6 +85,19 @@ fn creates_desired_tasks_and_deletes_all_omitted_tasks_in_mount() {
         fail_create: None,
         fail_delete: None,
     };
+    let expected = {
+        let mut dry_scheduler = FakeSchtasks {
+            query_xml: scheduler.query_xml.clone(),
+            creates: Vec::new(),
+            create_xmls: Vec::new(),
+            deletes: Vec::new(),
+            fail_create: None,
+            fail_delete: None,
+        };
+        let (dry_code, dry_out, dry_err) = run(&yaml, true, &mut dry_scheduler);
+        assert_eq!(dry_code, 0, "{dry_err}");
+        dry_out
+    };
     let (code, out, err) = run(&yaml, false, &mut scheduler);
     assert_eq!(code, 0, "{err}");
     assert_eq!(scheduler.creates, ["\\WinTasks\\cron\\backup"]);
@@ -97,14 +110,7 @@ fn creates_desired_tasks_and_deletes_all_omitted_tasks_in_mount() {
         scheduler.deletes,
         ["\\WinTasks", "\\WinTasks\\other\\obsolete"]
     );
-    assert_eq!(
-        out.lines().collect::<Vec<_>>(),
-        [
-            "create \\WinTasks\\cron\\backup",
-            "delete \\WinTasks",
-            "delete \\WinTasks\\other\\obsolete"
-        ]
-    );
+    assert_eq!(out, expected);
 }
 
 #[test]
@@ -145,10 +151,23 @@ fn update_replaces_existing_mount_task() {
         fail_create: None,
         fail_delete: None,
     };
+    let expected = {
+        let mut dry_scheduler = FakeSchtasks {
+            query_xml: scheduler.query_xml.clone(),
+            creates: Vec::new(),
+            create_xmls: Vec::new(),
+            deletes: Vec::new(),
+            fail_create: None,
+            fail_delete: None,
+        };
+        let (dry_code, dry_out, dry_err) = run(&yaml, true, &mut dry_scheduler);
+        assert_eq!(dry_code, 0, "{dry_err}");
+        dry_out
+    };
     let (code, out, err) = run(&yaml, false, &mut scheduler);
     assert_eq!(code, 0, "{err}");
     assert_eq!(scheduler.creates, ["\\WinTasks\\cron\\backup"]);
-    assert_eq!(out, "update \\WinTasks\\cron\\backup\n");
+    assert_eq!(out, expected);
 }
 
 #[test]
@@ -236,18 +255,24 @@ fn dry_run_ignores_owned_principal_and_settings_reordering() {
 
 #[test]
 fn mixed_sync_reports_definition_order_then_delete_and_orders_scheduler_calls() {
-    let (yaml, mut scheduler) = mixed_sync_fixture();
+    let (yaml, scheduler) = mixed_sync_fixture();
+    let expected = {
+        let mut dry_scheduler = FakeSchtasks {
+            query_xml: scheduler.query_xml.clone(),
+            creates: Vec::new(),
+            create_xmls: Vec::new(),
+            deletes: Vec::new(),
+            fail_create: None,
+            fail_delete: None,
+        };
+        let (dry_code, dry_out, dry_err) = run(&yaml, true, &mut dry_scheduler);
+        assert_eq!(dry_code, 0, "{dry_err}");
+        dry_out
+    };
+    let mut scheduler = scheduler;
     let (code, out, err) = run(&yaml, false, &mut scheduler);
     assert_eq!(code, 0, "{err}");
-    assert_eq!(
-        out.lines().collect::<Vec<_>>(),
-        [
-            "create \\WinTasks\\cron\\fresh",
-            "update \\WinTasks\\cron\\refresh",
-            "delete \\WinTasks\\obsolete",
-        ],
-        "{out}"
-    );
+    assert_eq!(out, expected);
     assert_eq!(
         scheduler.creates,
         ["\\WinTasks\\cron\\fresh", "\\WinTasks\\cron\\refresh"],

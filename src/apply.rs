@@ -116,7 +116,9 @@ pub fn run_sync(
             Action::Create | Action::Update => {
                 match scheduler.create(&task.path, &task.desired_xml) {
                     Ok(()) => {
-                        let _ = writeln!(out, "{} {}", label(&task.action), task.path);
+                        if let Err(message) = write_task_report(task, out) {
+                            return fail(&message, err);
+                        }
                     }
                     Err(error) => errors.push(format!(
                         "error: schtasks /Create /TN {} failed: {}",
@@ -129,7 +131,9 @@ pub fn run_sync(
     for task in &deletions {
         match scheduler.delete(&task.path) {
             Ok(()) => {
-                let _ = writeln!(out, "delete {}", task.path);
+                if let Err(message) = write_delete_report(task, out) {
+                    return fail(&message, err);
+                }
             }
             Err(error) => errors.push(format!(
                 "error: schtasks /Delete /TN {} failed: {}",
@@ -199,16 +203,25 @@ fn write_dry_run(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     for task in plan {
-        let _ = writeln!(out, "{} {}", label(&task.action), task.path);
-        if let (Action::Update, Some(current_xml)) = (&task.action, &task.current_xml) {
-            write_diff(current_xml, &task.desired_xml, out)?;
-        }
+        write_task_report(task, out)?;
     }
     for task in deletions {
-        let _ = writeln!(out, "delete {}", task.path);
-        write_diff(&task.xml, "", out)?;
+        write_delete_report(task, out)?;
     }
     Ok(())
+}
+
+fn write_task_report(task: &PlannedTask, out: &mut dyn Write) -> Result<(), String> {
+    let _ = writeln!(out, "{} {}", label(&task.action), task.path);
+    if let (Action::Update, Some(current_xml)) = (&task.action, &task.current_xml) {
+        write_diff(current_xml, &task.desired_xml, out)?;
+    }
+    Ok(())
+}
+
+fn write_delete_report(task: &ExistingTask, out: &mut dyn Write) -> Result<(), String> {
+    let _ = writeln!(out, "delete {}", task.path);
+    write_diff(&task.xml, "", out)
 }
 
 fn write_diff(current: &str, desired: &str, out: &mut dyn Write) -> Result<(), String> {

@@ -269,13 +269,13 @@ trigger 種別の選択:
 mount folder 配下の既存タスクは Description の内容にかかわらず同期対象であり、同一タスクパスのタスクを登録・更新できる。mount folder 外の同名タスクは変更しない。
 
 6. `--dry-run` 指定時は分類までを実行し、システムを変更せず各分類を表示する。`update` と `delete` の分類行には正規化した XML の unified diff を続ける（「### --dry-run の diff 表示」）。
-7. `--dry-run` でないときは、desired state の定義順に `create`、`update`、`no-change` を処理し、その後 `delete` をタスクパスの昇順で処理する。処理の完了ごとに分類を stdout へ出力する。
+7. `--dry-run` でないときは、desired state の定義順に `create`、`update`、`no-change` を処理し、その後 `delete` をタスクパスの昇順で処理する。各処理の完了後に分類を stdout へ出力し、`update` と `delete` の分類行には `--dry-run` と同じ unified diff を続ける。
 
 schtasks の create / delete の呼び出し失敗（権限不足など）は処理を続行し、最後に失敗したタスクパスと schtasks のエラーを報告して非ゼロ終了する。`/Query` の失敗は分類ができないため、即時にエラー終了する。wintasks は管理者権限へ自動昇格しない。
 
 ### --dry-run の diff 表示
 
-`--dry-run` では、`update` の分類行の下に同期対象の既存タスクと生成 XML の unified diff を出力し、`delete` の分類行の下に同期対象の既存タスクと空文書の unified diff を出力する。diff は各分類行の直後から始まり、stdout に出力する。`create` と `no-change` には diff を出力しない。
+`--dry-run` または通常実行では、`update` の分類行の下に同期対象の既存タスクと生成 XML の unified diff を出力し、`delete` の分類行の下に同期対象の既存タスクと空文書の unified diff を出力する。diff は各分類行の直後から始まり、stdout に出力する。`create` と `no-change` には diff を出力しない。
 
 比較前に XML を正規化する。正規化は XML 宣言を UTF-8 に統一し、空白だけのテキストを除去し、属性名を辞書順に並べ、要素・属性を同じインデントと改行でシリアライズする。`Task` 直下の既知要素は RegistrationInfo → Triggers → Principals → Settings → Actions の順に並べ替え、その他の要素は末尾で相対順を保持する。`Principals/Principal` の `RunLevel` → `LogonType` と、`Settings` の `StartWhenAvailable` → `DisallowStartIfOnBatteries` → `StopIfGoingOnBatteries` はこの順に並べ替える。それ以外の要素順と、生成 XML が所有する要素内容を保持する。`RegistrationInfo` の管理メタデータ（`Date`、`Author`、`Version`、`Source`、`URI`、`SecurityDescriptor`、`Documentation`、`Description`）、`CalendarTrigger/StartBoundary`、および `Actions` の `Context` 属性は比較から除外する。`Principals/Principal` の `id` 属性、`Settings`、`Principals/Principal`、トリガーのその他の要素に schtasks が追加する既定値は比較から除外し、生成 XML にある値は比較対象に含める。ただし `LogonTrigger` と `BootTrigger` の `Delay` が `PT0S` の場合は、要素の省略と同一視する。
 
@@ -319,4 +319,4 @@ usage エラーは `wintasks: <メッセージ>` に続けて usage を stderr �
 
 - schtasks の失敗: `error: schtasks /Create /TN <タスクパス> failed: <schtasks の標準エラー出力>` または `error: schtasks /Delete /TN <タスクパス> failed: <schtasks の標準エラー出力>`
 
-処理の報告は stdout へ出力する。1 行が `<分類> <タスクパス>` の形式で、分類は `create` / `update` / `no-change` / `delete` である。分類は YAML の定義順に、その後 `delete` をタスクパスの昇順で出力する。`--dry-run` では分類の表示後、`update` と `delete` の分類行に正規化した XML の unified diff を続ける。実行時は各処理の完了ごとに出力する。
+処理の報告は stdout へ出力する。1 行が `<分類> <タスクパス>` の形式で、分類は `create` / `update` / `no-change` / `delete` である。分類は YAML の定義順に、その後 `delete` をタスクパスの昇順で出力する。`--dry-run` または通常実行では分類の表示後、`update` と `delete` の分類行に正規化した XML の unified diff を続ける。通常実行では各処理の完了後に分類を表示する。
