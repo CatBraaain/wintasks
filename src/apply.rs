@@ -98,19 +98,8 @@ pub fn run_sync(
         .collect();
 
     if options.dry_run {
-        for task in &plan {
-            let _ = writeln!(out, "{} {}", label(&task.action), task.path);
-            if let (Action::Update, Some(current_xml)) = (&task.action, &task.current_xml)
-                && let Err(message) = write_diff(current_xml, &task.desired_xml, out)
-            {
-                return fail(&message, err);
-            }
-        }
-        for task in &deletions {
-            let _ = writeln!(out, "delete {}", task.path);
-            if let Err(message) = write_diff(&task.xml, "", out) {
-                return fail(&message, err);
-            }
+        if let Err(message) = write_dry_run(&plan, &deletions, out) {
+            return fail(&message, err);
         }
         return 0;
     }
@@ -196,6 +185,32 @@ fn is_in_mount(path: &str, mount: &str) -> bool {
     path == folder || path.starts_with(&format!("{folder}\\"))
 }
 
+fn write_dry_run(
+    plan: &[PlannedTask],
+    deletions: &[ExistingTask],
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let has_changes = plan
+        .iter()
+        .any(|task| !matches!(task.action, Action::NoChange))
+        || !deletions.is_empty();
+    if !has_changes {
+        let _ = writeln!(out, "No changes.");
+        return Ok(());
+    }
+    for task in plan {
+        let _ = writeln!(out, "{} {}", label(&task.action), task.path);
+        if let (Action::Update, Some(current_xml)) = (&task.action, &task.current_xml) {
+            write_diff(current_xml, &task.desired_xml, out)?;
+        }
+    }
+    for task in deletions {
+        let _ = writeln!(out, "delete {}", task.path);
+        write_diff(&task.xml, "", out)?;
+    }
+    Ok(())
+}
+
 fn write_diff(current: &str, desired: &str, out: &mut dyn Write) -> Result<(), String> {
     if let Some(diff) = task_xml_diff(current, desired)? {
         let _ = write!(out, "{diff}");
@@ -231,7 +246,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_equal_normalized_xml_as_no_change() {
+    fn reports_no_changes_for_a_no_change_plan() {
         let path = "\\WinTasks\\now\\task".to_string();
         let mut current = BTreeMap::new();
         current.insert(
@@ -252,5 +267,8 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(plan[0].action, Action::NoChange));
+        let mut output = Vec::new();
+        write_dry_run(&plan, &[], &mut output).unwrap();
+        assert_eq!(output, b"No changes.\n");
     }
 }

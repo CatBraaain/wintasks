@@ -196,6 +196,22 @@ fn mixed_sync_reports_definition_order_then_delete_and_orders_scheduler_calls() 
 }
 
 #[test]
+fn dry_run_reports_no_changes_when_nothing_needs_syncing() {
+    let mut scheduler = FakeSchtasks {
+        query_xml: String::new(),
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    let (code, out, err) = run("[]\n", true, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "No changes.\n");
+    assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
+}
+
+#[test]
 fn dry_run_diffs_update_and_delete_but_not_create() {
     let (yaml, mut scheduler) = mixed_sync_fixture();
     let (code, out, err) = run(&yaml, true, &mut scheduler);
