@@ -2,6 +2,9 @@
 
 use std::process::Command;
 
+const UTF8_XML_DECLARATION: &str = r#"<?xml version="1.0" encoding="UTF-8"?>"#;
+const UTF16_XML_DECLARATION: &str = r#"<?xml version="1.0" encoding="UTF-16"?>"#;
+
 use quick_xml::events::Event;
 use quick_xml::{Reader, Writer, XmlVersion};
 
@@ -91,9 +94,22 @@ fn write_temp_xml(xml: &str) -> Result<String, SchtasksError> {
     let path = std::env::temp_dir().join(format!("wintasks-{}.xml", std::process::id()));
     let mut file = std::fs::File::create(&path)
         .map_err(|error| SchtasksError(format!("cannot create temp XML file: {error}")))?;
-    file.write_all(xml.as_bytes())
+    file.write_all(&encode_task_xml(xml))
         .map_err(|error| SchtasksError(format!("cannot write temp XML file: {error}")))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+// schtasks requires the XML declaration and bytes to use the same UTF-16 LE encoding.
+// Keep the public XML UTF-8 so query normalization and diff output remain unchanged.
+fn encode_task_xml(xml: &str) -> Vec<u8> {
+    let xml = xml.strip_prefix(UTF8_XML_DECLARATION).map_or_else(
+        || xml.to_owned(),
+        |rest| format!("{UTF16_XML_DECLARATION}{rest}"),
+    );
+    let mut bytes = Vec::with_capacity(2 + xml.len() * 2);
+    bytes.extend_from_slice(&[0xFF, 0xFE]);
+    bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+    bytes
 }
 
 /// Parses concatenated Task XML documents until the first malformed document.
@@ -183,4 +199,21 @@ fn local_name(name: &str) -> String {
 
 fn uri_to_task_path(uri: &str) -> String {
     uri.trim().replace('/', "\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_schtasks_xml_as_utf16_le_with_matching_declaration() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Task><Command>日本語</Command></Task>"#;
+        let path = write_temp_xml(xml).unwrap();
+        let encoded = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(&encoded[..2], &[0xFF, 0xFE]);
+        assert_eq!(decode(&encoded), xml.replace("UTF-8", "UTF-16"));
+    }
 }
