@@ -151,6 +151,33 @@ fn update_replaces_existing_mount_task() {
     assert_eq!(out, "update \\WinTasks\\cron\\backup\n");
 }
 
+#[test]
+fn query_metadata_and_case_differences_are_no_change() {
+    let yaml = definitions(ONE_TASK);
+    let definitions = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap();
+    let desired = render_task_xml(&definitions.tasks[0], FIXED_NOW).unwrap();
+    let current = desired
+        .replace(
+            "<RegistrationInfo/>",
+            "<RegistrationInfo><URI>\\wintasks\\cron\\backup</URI><Date>2026-01-15T10:00:00</Date></RegistrationInfo>",
+        )
+        .replace("<Principal>", "<Principal><UserId>S-1-5-18</UserId>")
+        .replace("<Settings>", "<Settings><Enabled>true</Enabled>")
+        .replace("<Actions>", "<Actions Context=\"Author\">");
+    let mut scheduler = FakeSchtasks {
+        query_xml: current,
+        creates: Vec::new(),
+        create_xmls: Vec::new(),
+        deletes: Vec::new(),
+        fail_create: None,
+        fail_delete: None,
+    };
+    let (code, out, err) = run(&yaml, true, &mut scheduler);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "No changes.\n");
+    assert!(scheduler.creates.is_empty() && scheduler.deletes.is_empty());
+}
+
 fn mixed_sync_fixture() -> (String, FakeSchtasks) {
     let yaml = definitions(
         "  - name: fresh\n    trigger: { type: cron, value: '0 9 * * *' }\n    action: { command: cmd.exe, args: /c fresh }\n  - name: refresh\n    trigger: { type: cron, value: '0 9 * * *' }\n    action: { command: cmd.exe, args: /c refresh }\n",

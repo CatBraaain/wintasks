@@ -140,10 +140,14 @@ impl TaskDef {
 
 fn parent_directory(path: &str) -> Option<String> {
     let normalized = path.replace('/', "\\");
-    match normalized.rfind('\\') {
-        Some(0) | None => None,
-        Some(index) => Some(path[..index].to_string()),
+    let separator = normalized.rfind('\\')?;
+    if separator == 0 {
+        return Some("\\".to_string());
     }
+    if separator == 2 && normalized.as_bytes().get(1) == Some(&b':') {
+        return Some(normalized[..=separator].to_string());
+    }
+    Some(normalized[..separator].to_string())
 }
 
 #[derive(Debug)]
@@ -193,7 +197,13 @@ fn validate(definitions: &Definitions, file: &str) -> Result<(), DefError> {
     }
 
     let mut names = HashSet::new();
+    let mut task_paths = HashSet::new();
     for task in &definitions.tasks {
+        if task.name.is_empty() || task.name.contains(['\\', '/']) {
+            return Err(DefError {
+                message: format!("{file}: invalid task name `{}`", task.name),
+            });
+        }
         if !names.insert(&task.name) {
             return Err(DefError {
                 message: format!("{file}: duplicate task name `{}`", task.name),
@@ -207,6 +217,17 @@ fn validate(definitions: &Definitions, file: &str) -> Result<(), DefError> {
         if task.action.is_empty() {
             return Err(DefError {
                 message: format!("{file}: task `{}` must define an action", task.name),
+            });
+        }
+        let path = format!(
+            "\\{}\\{}\\{}",
+            definitions.mount,
+            task.trigger[0].kind.folder(),
+            task.name
+        );
+        if !task_paths.insert(path.to_lowercase()) {
+            return Err(DefError {
+                message: format!("{file}: duplicate task path `{path}`"),
             });
         }
     }

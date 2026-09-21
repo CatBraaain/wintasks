@@ -28,7 +28,15 @@ fn parses_documented_field_forms_and_rejects_invalid_extensions() {
     ] {
         assert!(render(expression).is_ok(), "{expression}");
     }
-    for expression in ["@daily", "1,3/2 * * * *", "* * * */5 *", "* * * * 7"] {
+    for expression in [
+        "@daily",
+        "1,3/2 * * * *",
+        "* * * */5 *",
+        "* * * * 7",
+        "*/60 * * * *",
+        "* */24 * * *",
+        "* * */32 * *",
+    ] {
         assert!(render(expression).is_err(), "{expression}");
     }
 }
@@ -55,6 +63,13 @@ fn sunday_started_weekday_ranges_are_valid() {
         let output = render(expression).unwrap();
         assert!(output.contains("<Sunday/>"), "{expression}: {output}");
         assert!(output.contains("<Tuesday/>"), "{expression}: {output}");
+    }
+}
+
+#[test]
+fn accepts_steps_at_the_field_maximum() {
+    for expression in ["*/59 * * * *", "* */23 * * *", "* * */31 * *"] {
+        assert!(render(expression).is_ok(), "{expression}");
     }
 }
 

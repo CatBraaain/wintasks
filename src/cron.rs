@@ -1,15 +1,10 @@
 //! Cron expression parsing for trigger decomposition.
 //!
 //! The spec's trigger decomposition table needs the *structure* of each field
-//! (star / range / step / list), which `cron` crate's public API does not
-//! expose (it only provides expanded value sets). So syntax is parsed here,
-//! and the reconstructed expression is validated through `cron` crate
-//! (with seconds `0` prepended and weekday values remapped 0-6 -> 1-7,
-//! because the crate requires 6 fields and numbers weekdays 1-7 with
-//! Sunday=1) as a final semantic check.
+//! (star / range / step / list), so syntax is parsed here and expanded directly
+//! into Task Scheduler trigger definitions.
 
 use std::fmt;
-use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Field {
@@ -132,8 +127,6 @@ impl CronSpec {
             month: parse_field(fields[3], "month", MONTH, &month_names(), false)?,
             dow: parse_field(fields[4], "weekday", DOW, &dow_names(), true)?,
         };
-        validate_with_cron_crate(&spec)
-            .map_err(|e| format!("invalid cron expression `{expr}`: {e}"))?;
         Ok(spec)
     }
 }
@@ -201,6 +194,11 @@ fn parse_field(
                 .map_err(|_| format!("invalid {name} field `{text}`: step must be a number"))?;
             if incr == 0 {
                 return Err(format!("invalid {name} field `{text}`: step must be >= 1"));
+            }
+            if incr > max {
+                return Err(format!(
+                    "invalid {name} field `{text}`: step must be <= {max}"
+                ));
             }
             (body, incr, true)
         }
@@ -283,57 +281,6 @@ fn parse_value_or_range(
             Ok((v, v))
         }
     }
-}
-
-fn validate_with_cron_crate(spec: &CronSpec) -> Result<(), String> {
-    let dow_field = |f: &Field| -> String {
-        // Spec 0-6 (Sunday=0) -> crate 1-7 (Sunday=1).
-        let remap = |v: u32| v + 1;
-        match *f {
-            Field::Star { incr: 1 } => "*".to_string(),
-            Field::Star { incr } => format!("*/{incr}"),
-            Field::Range {
-                start,
-                end,
-                incr: 1,
-            } => format!("{}-{}", remap(start), remap(end)),
-            Field::Range { start, end, incr } => {
-                format!("{}-{}/{}", remap(start), remap(end), incr)
-            }
-            Field::List(ref vs) => vs
-                .iter()
-                .map(|v| remap(*v).to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        }
-    };
-    let plain = |f: &Field| -> String {
-        match *f {
-            Field::Star { incr: 1 } => "*".to_string(),
-            Field::Star { incr } => format!("*/{incr}"),
-            Field::Range {
-                start,
-                end,
-                incr: 1,
-            } => format!("{start}-{end}"),
-            Field::Range { start, end, incr } => format!("{start}-{end}/{incr}"),
-            Field::List(ref vs) => vs
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        }
-    };
-    let expr = format!(
-        "0 {} {} {} {} {}",
-        plain(&spec.minute),
-        plain(&spec.hour),
-        plain(&spec.day),
-        plain(&spec.month),
-        dow_field(&spec.dow)
-    );
-    cron::Schedule::from_str(&expr).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 impl fmt::Display for Field {
@@ -469,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_five_field_expression_with_cron_crate_validation() {
+    fn parses_five_field_expression() {
         let spec = CronSpec::parse("00 09 * * *").unwrap();
         assert_eq!(spec.minute, Field::List(vec![0]));
         assert_eq!(spec.hour, Field::List(vec![9]));
@@ -478,11 +425,16 @@ mod tests {
     }
 
     #[test]
-    fn cron_crate_validation_maps_sunday_zero() {
-        // dow 0 (Sunday) must survive the 1-7 remap used for validation.
+    fn parses_sunday_zero_and_named_weekdays() {
         CronSpec::parse("0 12 * * 0").unwrap();
         CronSpec::parse("0 12 * * sun").unwrap();
         CronSpec::parse("*/15 9-17 * * MON-FRI").unwrap();
+    }
+
+    #[test]
+    fn rejects_steps_above_field_maximum() {
+        assert!(minute_err("*/60").contains("step must be <= 59"));
+        assert!(CronSpec::parse("* */24 * * *").is_err());
     }
 
     #[test]

@@ -41,7 +41,7 @@ Options:
 
 | キー | 必須 | 値 |
 |---|---|---|
-| `name` | 必須 | タスク定義名。ファイル内で重複してはならない |
+| `name` | 必須 | 空でなく、`\` または `/` を含まない単一のタスクパス末尾要素。ファイル内で重複してはならない |
 | `trigger` | 必須 | トリガー定義 1 個、またはその配列 |
 | `action` | 必須 | アクション定義 1 個、またはその配列 |
 | `setting` | 任意 | 実行アカウント設定 |
@@ -72,7 +72,7 @@ setting 定義:
 
 Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガーの type>\<name>` である。トリガーが配列のとき、先頭要素の type を使う。`--mount WinTasks`、`name: backup`、先頭トリガーが `cron` のタスクパスは `\WinTasks\cron\backup` である。
 
-タスク定義の `name` はタスクパスの末尾要素である。同期対象は mount folder 自身と、そのすべての子フォルダにあるタスクである。desired state にない同期対象タスクは削除する。
+タスク定義の `name` はタスクパスの末尾要素である。空の `name`、`\` または `/` を含む `name` は定義エラーである。同期対象は mount folder 自身と、そのすべての子フォルダにあるタスクである。desired state にない同期対象タスクは削除する。Task Scheduler のタスクパス比較は大文字小文字を区別せず、desired state 内で同じ比較キーになるタスクパスは定義エラーである。
 
 ## XML 生成
 
@@ -157,7 +157,7 @@ Task Scheduler 上のタスクの完全パスは `\<mount>\<先頭トリガー�
 - `*`（全値）
 - 単一値
 - `n-m`（範囲。月・曜日では `n` と `m` に名前も使える）
-- `*/n`、`n-m/n`、`n/n`（ステップ。`n/n` は「n から最大値まで n 刻み」）
+- `*/n`、`n-m/n`、`n/n`（ステップ。`n/n` は「n から最大値まで n 刻み」。`n` は 1 以上でフィールドの最大値以下）
 - カンマ区切りのリスト。各要素は単一値または範囲（例: `1-3,5`、`MON,WED,FRI`）
 
 フィールドごとの制約:
@@ -255,7 +255,7 @@ trigger 種別の選択:
 `wintasks` は次の順序で YAML と mount folder を同期する。
 
 1. `--path FILE` で指定されたファイル（省略時は `wintasks.yaml`）を読み込みパースし、`--mount FOLDER` の指定値（省略時は `wintasks`）の形式を検証する。パースエラー、mount の形式エラー、name 重複、XML 生成エラーのいずれかがあった場合は、システムを変更せずエラー終了する。
-2. `schtasks /Query /XML` でシステム上の全タスクの XML を取得する。`/Query` の出力は BOM 付き UTF-16 または UTF-8 で返るため、BOM で判別してデコードする。BOM がなければ UTF-8 として読む。query 出力の 1 文書をパースできなかったときは、その文書以降を無視し、それまでに読めたタスクだけで処理を続行する。
+2. `schtasks /Query /XML` でシステム上の全タスクの XML を取得する。`/Query` の出力は BOM 付き UTF-16 または UTF-8 で返るため、BOM で判別してデコードする。BOM がなく UTF-8 として妥当なバイト列は UTF-8 として読む。それ以外の BOM なし Windows 出力は、接続されたコンソールの出力コードページでデコードする。コンソールがない実行環境では Windows の OEM コードページを使う。query 出力の 1 文書をパースできなかったときは、その文書以降を無視し、それまでに読めたタスクだけで処理を続行する。
 3. タスクパスが mount folder 自身またはその子フォルダにあるタスクだけを同期対象とする。mount folder の外にあるタスクは分類・変更しない。
 4. desired state の各タスクと同期対象の既存タスクをタスクパスで比較し、次のように分類する。
 
@@ -277,7 +277,7 @@ schtasks の create / delete の呼び出し失敗（権限不足など）は処
 
 `--dry-run` では、`update` の分類行の下に同期対象の既存タスクと生成 XML の unified diff を出力し、`delete` の分類行の下に同期対象の既存タスクと空文書の unified diff を出力する。diff は各分類行の直後から始まり、stdout に出力する。`create` と `no-change` には diff を出力しない。
 
-比較前に XML を正規化する。正規化は XML 宣言を UTF-8 に統一し、空白だけのテキストを除去し、属性名を辞書順に並べ、要素・属性を同じインデントと改行でシリアライズする。XML の要素順と、除外対象以外の要素内容を保持する。`RegistrationInfo/Description` と `CalendarTrigger/StartBoundary` は比較から除外する。schtasks が返すそれ以外の要素は比較対象に含める。
+比較前に XML を正規化する。正規化は XML 宣言を UTF-8 に統一し、空白だけのテキストを除去し、属性名を辞書順に並べ、要素・属性を同じインデントと改行でシリアライズする。XML の要素順と、生成 XML が所有する要素内容を保持する。`RegistrationInfo` の管理メタデータ（`Date`、`Author`、`Version`、`Source`、`URI`、`SecurityDescriptor`、`Documentation`、`Description`）、`CalendarTrigger/StartBoundary`、および `Actions` の `Context` 属性は比較から除外する。`Settings`、`Principals/Principal`、トリガーのその他の要素に schtasks が追加する既定値は比較から除外し、生成 XML にある値は比較対象に含める。
 
 `update` の diff は既存 XML を `--- current`、生成 XML を `+++ desired` とする unified diff である。`delete` の diff は既存 XML を `--- current`、空文書を `+++ desired` とする。
 
@@ -309,6 +309,8 @@ update \WinTasks\cron\backup
 - ファイル読み取り失敗: `wintasks: <path>: <入出力エラーの内容>`
 - YAML パースエラー: 発生位置が分かるときは `wintasks: <file>:<line>:<col>: <原因>`、分からないときは `wintasks: <file>: <原因>`。name 重複は `wintasks: <file>: duplicate task name `<name>``、空または null ドキュメントは `wintasks: <file>: no task definitions found (file is empty or null)`。mount 形式エラーは `wintasks: <file>: mount must be a non-root folder path`
 - XML 生成エラー: `wintasks: <path>: XML generation failed for task `<name>`: <原因>`
+- name 制約エラー: `wintasks: <file>: invalid task name `<name>``
+- desired task path の衝突: `wintasks: <file>: duplicate task path `<path>``
 - `/Query` の失敗: `wintasks: schtasks /Query /XML failed: <schtasks の標準エラー出力>`
 
 usage エラーは `wintasks: <メッセージ>` に続けて usage を stderr へ出力する。

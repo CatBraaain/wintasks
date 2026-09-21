@@ -83,9 +83,73 @@ pub fn decode(bytes: &[u8]) -> String {
             .map(|chunk| u16::from_be_bytes(*chunk))
             .collect::<Vec<_>>();
         String::from_utf16_lossy(&units)
+    } else if let Ok(text) = std::str::from_utf8(bytes) {
+        text.to_owned()
     } else {
-        String::from_utf8_lossy(bytes).into_owned()
+        decode_windows_code_page(bytes)
     }
+}
+
+#[cfg(windows)]
+fn decode_windows_code_page(bytes: &[u8]) -> String {
+    let code_page = unsafe {
+        let console_code_page = GetConsoleOutputCP();
+        if console_code_page == 0 {
+            GetOEMCP()
+        } else {
+            console_code_page
+        }
+    };
+    decode_with_code_page(bytes, code_page)
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(windows)]
+fn decode_with_code_page(bytes: &[u8], code_page: u32) -> Option<String> {
+    let byte_count = i32::try_from(bytes.len()).ok()?;
+    unsafe {
+        let required = MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr().cast(),
+            byte_count,
+            std::ptr::null_mut(),
+            0,
+        );
+        if required <= 0 {
+            return None;
+        }
+        let mut units = vec![0u16; required as usize];
+        let written = MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr().cast(),
+            byte_count,
+            units.as_mut_ptr(),
+            required,
+        );
+        (written > 0).then(|| String::from_utf16_lossy(&units[..written as usize]))
+    }
+}
+
+#[cfg(not(windows))]
+fn decode_windows_code_page(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetConsoleOutputCP() -> u32;
+    fn GetOEMCP() -> u32;
+    fn MultiByteToWideChar(
+        code_page: u32,
+        flags: u32,
+        multi_byte_str: *const i8,
+        cb_multi_byte: i32,
+        wide_char_str: *mut u16,
+        cch_wide_char: i32,
+    ) -> i32;
 }
 
 fn write_temp_xml(xml: &str) -> Result<String, SchtasksError> {
@@ -215,5 +279,11 @@ mod tests {
 
         assert_eq!(&encoded[..2], &[0xFF, 0xFE]);
         assert_eq!(decode(&encoded), xml.replace("UTF-8", "UTF-16"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decodes_non_utf8_bytes_with_the_selected_windows_code_page() {
+        assert_eq!(decode_with_code_page(&[0xE9], 1252).as_deref(), Some("é"));
     }
 }

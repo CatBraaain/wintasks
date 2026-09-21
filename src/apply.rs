@@ -83,17 +83,20 @@ pub fn run_sync(
     let current: BTreeMap<_, _> = extract_tasks(&query)
         .into_iter()
         .filter(|task| is_in_mount(&task.path, &definitions.mount))
-        .map(|task| (task.path.clone(), task))
+        .map(|task| (task_path_key(&task.path), task))
         .collect();
 
     let plan = match classify(&desired, &current) {
         Ok(plan) => plan,
         Err(message) => return fail(&message, err),
     };
-    let desired_paths: BTreeSet<_> = desired.iter().map(|(path, _)| path.as_str()).collect();
+    let desired_paths: BTreeSet<_> = desired
+        .iter()
+        .map(|(path, _)| task_path_key(path))
+        .collect();
     let deletions: Vec<_> = current
         .values()
-        .filter(|task| !desired_paths.contains(task.path.as_str()))
+        .filter(|task| !desired_paths.contains(&task_path_key(&task.path)))
         .cloned()
         .collect();
 
@@ -160,7 +163,7 @@ fn classify(
     desired
         .iter()
         .map(|(path, desired_xml)| {
-            let existing = current.get(path);
+            let existing = current.get(&task_path_key(path));
             let action = match existing {
                 None => Action::Create,
                 Some(existing)
@@ -181,8 +184,13 @@ fn classify(
 }
 
 fn is_in_mount(path: &str, mount: &str) -> bool {
-    let folder = format!("\\{mount}");
+    let path = task_path_key(path);
+    let folder = task_path_key(&format!("\\{mount}"));
     path == folder || path.starts_with(&format!("{folder}\\"))
+}
+
+fn task_path_key(path: &str) -> String {
+    path.to_lowercase()
 }
 
 fn write_dry_run(
@@ -250,7 +258,7 @@ mod tests {
         let path = "\\WinTasks\\now\\task".to_string();
         let mut current = BTreeMap::new();
         current.insert(
-            path.clone(),
+            task_path_key(&path),
             ExistingTask {
                 path: path.clone(),
                 xml: "<Task><RegistrationInfo><Description>old</Description></RegistrationInfo></Task>"

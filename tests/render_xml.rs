@@ -121,6 +121,16 @@ fn normalizing_ignores_only_description_and_calendar_boundaries() {
 }
 
 #[test]
+fn normalizing_ignores_scheduler_metadata_and_defaults() {
+    let current = "<Task><RegistrationInfo><URI>old-uri</URI><Date>old</Date></RegistrationInfo><Principals><Principal><UserId>old</UserId><RunLevel>LeastPrivilege</RunLevel><LogonType>InteractiveToken</LogonType></Principal></Principals><Settings><Enabled>true</Enabled><StartWhenAvailable>true</StartWhenAvailable></Settings><Actions Context=\"Author\"><Exec><Command>cmd.exe</Command></Exec></Actions></Task>";
+    let desired = "<Task><RegistrationInfo/><Principals><Principal><RunLevel>LeastPrivilege</RunLevel><LogonType>InteractiveToken</LogonType></Principal></Principals><Settings><StartWhenAvailable>true</StartWhenAvailable></Settings><Actions><Exec><Command>cmd.exe</Command></Exec></Actions></Task>";
+    assert_eq!(
+        normalized_task_xml(current).unwrap(),
+        normalized_task_xml(desired).unwrap()
+    );
+}
+
+#[test]
 fn root_child_order_and_settings_are_exact() {
     let yaml = definitions(
         "  - name: admin\n    trigger: { type: now, value: x }\n    action: { command: cmd.exe }\n    setting: { run_as: true, logon_type: s4u }\n",

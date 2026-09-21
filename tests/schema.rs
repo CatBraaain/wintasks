@@ -62,6 +62,18 @@ fn resolves_actions_and_settings() {
         wintasks::def::TaskDef::resolve_working_directory(&task.action[0]).as_deref(),
         Some("C:\\Tools")
     );
+
+    for command in ["C:\\app.exe", "C:/app.exe"] {
+        let action = wintasks::def::ActionDef {
+            command: command.to_string(),
+            args: None,
+            working_directory: None,
+        };
+        assert_eq!(
+            wintasks::def::TaskDef::resolve_working_directory(&action).as_deref(),
+            Some("C:\\")
+        );
+    }
 }
 
 #[test]
@@ -79,6 +91,32 @@ fn rejects_missing_and_unknown_nested_keys() {
             "{tasks}"
         );
     }
+}
+
+#[test]
+fn rejects_empty_and_nested_task_names_before_sync() {
+    for name in ["", "child\\\\grandchild", "child/grandchild"] {
+        let yaml = definitions(&format!(
+            "  - name: '{name}'\n    trigger: {{ type: now, value: x }}\n    action: {{ command: c }}\n"
+        ));
+        let error = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("wintasks.yaml: invalid task name `{name}`")
+        );
+    }
+}
+
+#[test]
+fn rejects_case_insensitive_duplicate_task_paths() {
+    let yaml = definitions(
+        "  - name: Task\n    trigger: { type: now, value: x }\n    action: { command: c }\n  - name: task\n    trigger: { type: now, value: x }\n    action: { command: c }\n",
+    );
+    let error = parse_defs(&yaml, "wintasks.yaml", "WinTasks").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "wintasks.yaml: duplicate task path `\\WinTasks\\now\\task`"
+    );
 }
 
 #[test]

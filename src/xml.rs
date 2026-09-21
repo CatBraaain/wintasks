@@ -257,9 +257,14 @@ pub fn normalized_task_xml(xml: &str) -> Result<String, String> {
             Event::Start(event) => {
                 let name = local_name(event.name().as_ref());
                 let excluded = is_excluded(elements.last(), &name);
-                elements.push(name);
+                elements.push(name.clone());
                 if excluded_depth > 0 {
                     excluded_depth += 1;
+                } else if name == "RegistrationInfo" {
+                    writer
+                        .write_event(Event::Empty(sorted_start(&event)?))
+                        .map_err(|error| error.to_string())?;
+                    excluded_depth = 1;
                 } else if excluded {
                     excluded_depth = 1;
                 } else {
@@ -307,10 +312,17 @@ pub fn normalized_task_xml(xml: &str) -> Result<String, String> {
 }
 
 fn is_excluded(parent: Option<&String>, name: &str) -> bool {
-    matches!(
-        (parent.map(String::as_str), name),
-        (Some("RegistrationInfo"), "Description") | (Some("CalendarTrigger"), "StartBoundary")
-    )
+    match parent.map(String::as_str) {
+        Some("RegistrationInfo") => true,
+        Some("CalendarTrigger") => matches!(name, "StartBoundary" | "Enabled" | "EndBoundary"),
+        Some("LogonTrigger" | "BootTrigger" | "TimeTrigger") => name == "Enabled",
+        Some("Principal") => !matches!(name, "RunLevel" | "LogonType"),
+        Some("Settings") => !matches!(
+            name,
+            "StartWhenAvailable" | "DisallowStartIfOnBatteries" | "StopIfGoingOnBatteries"
+        ),
+        _ => false,
+    }
 }
 
 fn local_name(name: &str) -> String {
@@ -319,9 +331,15 @@ fn local_name(name: &str) -> String {
 }
 
 fn sorted_start(event: &BytesStart<'_>) -> Result<BytesStart<'static>, String> {
+    let element_name = local_name(event.name().as_ref());
     let mut attributes = event
         .attributes()
         .map(|attribute| attribute.map_err(|error| error.to_string()))
+        .filter(|attribute| {
+            attribute.as_ref().is_ok_and(|attribute| {
+                !(element_name == "Actions" && local_name(attribute.key.as_ref()) == "Context")
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     attributes.sort_by(|left, right| left.key.as_ref().cmp(right.key.as_ref()));
 
